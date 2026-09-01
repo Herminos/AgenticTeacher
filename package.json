@@ -1,6 +1,7 @@
 {
   "name": "agentic-teacher",
   "private": true,
+  "license": "MIT",
   "workspaces": ["frontend"],
   "scripts": {
     "dev": "npm --prefix frontend run dev",

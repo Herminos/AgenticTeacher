@@ -1,6 +1,7 @@
 {
   "name": "agentic-teacher-web",
   "private": true,
+  "license": "MIT",
   "scripts": {
     "dev": "next dev",
     "build": "NEXT_DIST_DIR=.next-build next build",

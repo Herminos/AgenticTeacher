@@ -186,3 +186,7 @@ npm test --prefix frontend
 后端测试覆盖 health、rewrite、retrieve、SSE 和 Sympy 安全边界；前端测试确认 LangGraph 模块可加载。上线前应补充真实模型 provider、检索 golden set（Recall@K/MRR）、视觉解析回归和 Playwright 端到端测试。
 
 详细模块职责和事件/状态流见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
+
+## 许可证
+
+项目源代码采用 [MIT License](LICENSE) 开源。第三方依赖、模型权重以及用户上传的教材或其他内容仍分别受其各自许可证和权利约束。
