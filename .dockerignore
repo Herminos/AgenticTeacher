@@ -1,0 +1,15 @@
+*
+
+!Dockerfile
+!requirements.txt
+!app/
+!app/**
+!config/
+!config/**
+!ingest.py
+!scripts/
+!scripts/**
+
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/

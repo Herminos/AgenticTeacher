@@ -1,0 +1,51 @@
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.13.2
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    healthcheck:
+      # 官方 Qdrant 镜像是精简镜像，不包含 wget/curl。这里检查主进程，
+      # API 服务的 /health/ready 会进一步通过 HTTP 校验 Qdrant 是否可用。
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      QDRANT_URL: http://qdrant:6333
+      LLM_PROVIDER: ${LLM_PROVIDER:-mock}
+      LLM_MODEL: ${LLM_MODEL:-mock-teacher}
+      MODEL_CACHE_DIR: /app/models
+      HF_EMBEDDING_MODEL: ${HF_EMBEDDING_MODEL:-Qwen/Qwen3-Embedding-0.6B}
+      RERANKER_MODEL: ${RERANKER_MODEL:-Qwen/Qwen3-Reranker-0.6B}
+      HF_ENABLE_LOCAL_MODELS: ${HF_ENABLE_LOCAL_MODELS:-false}
+      HF_ENABLE_RERANKER: ${HF_ENABLE_RERANKER:-false}
+      HF_LOCAL_FILES_ONLY: ${HF_LOCAL_FILES_ONLY:-false}
+      MODEL_DEVICE: ${MODEL_DEVICE:-auto}
+      MODEL_DTYPE: ${MODEL_DTYPE:-auto}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000}
+      MAX_AGENT_ITERATIONS: ${MAX_AGENT_ITERATIONS:-3}
+      MAX_TOP_K: ${MAX_TOP_K:-15}
+      RETRIEVAL_CANDIDATE_K: ${RETRIEVAL_CANDIDATE_K:-15}
+      RERANKER_TOP_K: ${RERANKER_TOP_K:-5}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    volumes:
+      - hf_model_cache:/app/models
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready')"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  qdrant_storage:
+  hf_model_cache:

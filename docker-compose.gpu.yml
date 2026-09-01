@@ -1,0 +1,18 @@
+services:
+  api:
+    environment:
+      MODEL_DEVICE: cuda
+      MODEL_DTYPE: bfloat16
+      HF_ENABLE_LOCAL_MODELS: "true"
+      HF_ENABLE_RERANKER: "true"
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    volumes:
+      - ./models:/app/models

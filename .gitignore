@@ -1,0 +1,12 @@
+.env
+.env.local
+models/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+node_modules/
+.next/
+.next-build/
+data/*/.ingest_manifest.json
+.venv/
+.venv*/

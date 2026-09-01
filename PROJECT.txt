@@ -1,0 +1,585 @@
+================================================================================
+        理工科全科目 Agentic RAG 智能教学系统 - 完整技术规格说明书
+================================================================================
+
+文档版本：1.1（工程修订版）
+本版修订原则：保留“本地 LangGraph Agent + FastAPI 模型/RAG 服务”的核心架构，
+仅收紧接口、数据、安全、部署和测试等工程边界；本地 Agent 仍可独立开源和替换。
+项目目标：为理工科本科生（微积分、线性代数、大学物理、化学、编程算法等）
+          提供基于 Agentic RAG 的智能答疑服务。
+
+核心架构模式：“客户端决策层（LangGraph.js）+ 服务端算力/数据层（FastAPI）”。
+          即：客户端（浏览器或本地 Node.js 运行时）负责 Agent 流程控制、路由和
+          状态展示；服务端负责模型推理、向量检索、文件索引和受控计算。
+          Agent 编排代码可以开源并在本地运行，但所有高成本能力和资源限制必须
+          在服务端强制执行。严禁在浏览器端直接加载 Transformers 或 Torch，模型
+          凭据也不得下发到浏览器。
+
+================================================================================
+一、核心设计哲学（必须严格遵守）
+================================================================================
+
+1. 多模态优先、按需解析：
+   教学资料包含大量 PPT/PDF 图表、复杂公式。对有文本层的 PDF/PPT，先保留
+   原始文本和版面坐标；对图表、扫描页、公式密集页再转图片交给多模态模型
+   （如 Qwen-VL / GPT-4o）补充结构化 Markdown。纯文本提取不能作为唯一方案，
+   但也不应对每一页无条件调用视觉模型，以兼顾准确性、成本和可重建性。
+
+2. Agentic 反思循环（自我纠错）：
+   系统必须支持“检索 -> 评估充分性 -> 若不足则重写查询 -> 再次检索”的
+   自我反思机制。默认最多执行 3 次检索尝试（客户端配置用于体验，服务端
+   强制上限），并记录每次查询和结果，防止死循环和隐性成本失控。
+
+3. 理科计算路由：
+   Agent 在入口处识别“求导、积分、解方程”等计算意图。对高置信度的纯符号
+   计算请求，可直接调用 Sympy；对“解释方法”“结合教材讲解”或计算与知识问答
+   混合的请求，允许走 RAG，必要时在生成过程中调用计算服务。计算服务必须
+   使用白名单解析、独立进程/沙箱和超时限制，禁止执行任意 Python 代码。
+
+4. 全过程透明（安全 Trace）：
+   前端 UI 必须实时展示 Agent 的操作轨迹（Trace），例如：
+   “正在改写查询... -> 检索第 3 章教材... -> 信息不足，二次检索... ->
+   生成回答”。Trace 只包含节点、状态、耗时、检索摘要和错误信息，不展示
+   隐藏思维链、系统 Prompt、密钥或内部安全规则。
+
+5. 严禁全量拼接：
+   绝对禁止将整本教材（几十万 Token）直接塞进 Prompt。默认通过 RAG 精选
+   Top-3 片段送入上下文；当问题需要覆盖多个知识点时，可在服务端允许的
+   上限内动态扩展 Top-K，并执行去重、上下文长度和 Token 预算控制。
+
+================================================================================
+二、系统分层架构与职责
+================================================================================
+
+【前端决策层】（客户端）
+  技术栈：Next.js 14 + TypeScript + LangGraph.js
+  核心职责：
+  1. 运行 LangGraph 状态机（改写、路由、循环判断）。
+  2. 管理 UI 状态与交互（公式渲染、图片上传、流式渲染）。
+  3. 通过 HTTP API 调用后端的所有模型能力。
+  4. 保存本地会话、取消运行、重试和安全 Trace 状态。
+  注意：绝对不加载任何 Python 模型或 Torch，所有模型推理、检索和计算必须走
+  后端接口。客户端状态可被用户修改，不能作为权限、配额或计费依据。
+
+【高算力服务层】（服务端）
+  技术栈：Python 3.10–3.13 + FastAPI + HuggingFace Transformers（推荐 Python 3.11；
+          Python 3.14 暂不支持，避免旧版 PyO3/pydantic-core 触发本地编译失败）
+  核心职责：
+  1. 管理并按需加载重型模型（Embedding、Reranker、改写模型、LLM），支持 provider
+     适配、缓存和懒加载，启动失败时提供明确的 ready 状态。
+  2. 执行 Qdrant 向量检索、稀疏/BM25 关键词检索、融合和重排序。
+  3. 提供 SSE 流式生成接口、文件接口和受控符号计算接口。
+  4. 对每个请求执行鉴权（如启用）、参数校验、超时、限流、配额和用量计量。
+  5. 暴露原子化的 API 供本地 Agent 调用；不依赖客户端传入的 iteration 或费用数据。
+
+【向量存储层】（数据库）
+  技术栈：Qdrant (Docker 容器化部署)
+  核心职责：
+  1. 存储教材文本块、假设性问题向量及元数据（页码、文件名、章节）。
+  2. 支持多 Collection 隔离（如 math_collection, physics_collection），或在同一
+     Collection 中使用 named dense/sparse vectors；subject 到 Collection 的映射
+     必须使用服务端白名单。
+  3. Payload 至少包含 source_id、chunk_id、filename、page、chapter、content_hash
+     和可选的版面坐标，便于增量索引、去重和引用回溯。
+
+================================================================================
+三、完整技术栈明细表
+================================================================================
+
+【后端 (算力服务)】
+  - Web 框架：FastAPI + Uvicorn
+  - 嵌入模型：Qwen3-Embedding-0.6B（维度从模型配置读取，并与 Collection 校验）
+  - 重排序模型：Qwen3-Reranker-0.6B
+  - 查询改写模型：Qwen2.5-0.5B-Instruct（可替换，用于口语转书面语）
+  - 生成模型（可插拔）：支持本地 vLLM 或 OpenAI API，需支持多模态输入；通过
+    provider adapter 屏蔽不同供应商的请求格式。
+  - 向量数据库驱动：qdrant-client（dense/sparse named vectors，融合策略可配置）
+  - 符号计算引擎：Sympy
+  - 数据校验：Pydantic Settings / Pydantic schema
+  - 包管理：requirements.txt（必须锁定或约束关键依赖版本）
+
+【前端 (决策与 UI)】
+  - 框架：Next.js 14 (App Router) + TypeScript
+  - 状态机编排：@langchain/langgraph（运行在浏览器端；也应支持 Node.js/CLI 运行时）
+  - 样式组件：Tailwind CSS + Shadcn/ui (Radix UI)
+  - 公式渲染：react-katex (LaTeX 渲染) + react-syntax-highlighter (代码高亮)
+  - Markdown 渲染：react-markdown + remark-math + rehype-katex
+  - 前端状态管理：Zustand (管理会话列表、Agent Trace、检索来源)
+    本地持久化默认不保存 API token 和原始图片；会话/附件支持清理和保留期限配置。
+  - 文件上传：react-dropzone (支持拖拽上传图片/PDF；大文件通过文件接口传引用)
+
+================================================================================
+四、Agentic RAG 工作流（LangGraph 图结构定义）
+================================================================================
+
+【Agent 状态定义 (TypeScript 接口)】
+  interface Document {
+    text: string;
+    metadata: {
+      source_id: string;
+      chunk_id: string;
+      filename?: string;
+      page?: number;
+      chapter?: string;
+      [key: string]: unknown;
+    };
+    score?: number;
+    normalized_score?: number;
+    score_type?: string;
+  }
+
+  interface ComputeResult {
+    result: string;
+    warnings: string[];
+    verified?: boolean;
+  }
+
+  interface TraceEvent {
+    event_id: string;
+    stream: "agent" | "service";
+    seq: number;                 // 在同一 stream 内单调递增
+    step: "router" | "rewrite" | "retrieve" | "grade" | "compute" | "generate";
+    status: "queued" | "running" | "succeeded" | "failed" | "skipped";
+    duration_ms?: number;
+    summary?: string;
+    retry_reason?: string;
+  }
+
+  interface AgentState {
+    query: string;              // 用户原始口语问题
+    rewritten_query: string;    // 改写后的学术陈述句
+    documents: Document[];      // 检索到的文档片段列表
+    route: "compute" | "rag" | "hybrid" | "error";
+    subject?: string;           // 当前学科，由服务端白名单校验
+    iteration: number;          // 已完成的检索尝试次数，从 0 开始
+    max_iterations: number;     // 客户端默认值为 3；有效值由服务端夹紧到 1..3
+    is_sufficient: boolean;     // 检索到的信息是否充分
+    final_answer: string;       // 最终生成的答案
+    compute_result?: ComputeResult;
+    retrieval_history: string[]; // 每次实际发出的检索查询
+    trace: TraceEvent[];          // 仅包含可展示的执行事件，不含隐藏思维链
+    request_id?: string;         // 当前 HTTP 调用；每个节点调用可不同
+    request_ids: string[];       // 本次 Agent run 已发出的 HTTP request_id
+    session_id?: string;
+    agent_run_id: string;
+    error?: { code: string; message: string; retryable: boolean };
+  }
+
+  约定：一次 Retrieve + Grade 算作一次检索尝试。初始 iteration=0，Retrieve
+  成功后加 1；因此 max_iterations=3 时最多执行 3 次检索。HTTP 重试（仅对
+  幂等请求）与 Agent 反思循环分开计数，不能通过重试绕过上限。服务端对
+  max_iterations、top_k 和 timeout 等数值执行正数校验和上下限夹紧。
+
+【节点执行顺序（必须严格按此逻辑编码）】
+
+  1. Router Node (入口路由节点)：
+     - 使用确定性的关键词、表达式解析和轻量意图分类检测“计算题”，关键词只
+       作为候选信号，不能单独决定路由。若意图分类需要模型，必须通过后端 API；
+       浏览器端不得加载分类模型。
+     - 高置信度纯符号计算请求调用 /compute；需要教材解释或置信度不足时走
+       RAG，计算与讲解混合时使用 hybrid 路由。
+     - 纯计算分支在成功后直接结束；解析失败或超时时返回可解释的错误，或在用户
+       明确需要讲解时降级至 RAG，不能生成空答案。普通请求流转至 Rewrite Node。
+       计算结果写回 AgentState，并带上超时/错误状态。
+
+  2. Rewrite Node (查询改写节点)：
+     - 调用后端 /rewrite API。
+     - 功能：将口语化提问转为正式的学术检索语句。
+       例：“那个极限怎么求？” -> “求极限的洛必达法则应用步骤”。
+     - 必须保留原始 query；反思时把上一轮查询、缺失信息和已召回摘要传入，
+       避免查询不断漂移或重复改写。
+
+  3. Retrieve Node (多路检索节点)：
+     - 调用后端 /retrieve API。
+     - 功能：执行多路召回（向量检索 + BM25 关键词检索），
+       分别查询对应的 named vector，再按 chunk_id 使用 RRF/归一化权重融合，
+       然后调用 Reranker 模型对去重后的候选进行精排。
+     - 输出：默认返回精排后的 Top-3 文档片段；服务端可在上限内按覆盖度扩展
+       Top-K，并在返回前按 chunk_id 去重，返回归一化分数、score_type、chunk_id
+       和引用元数据。
+
+  4. Grade Node (充分性判断节点)：
+     - 重要约束：此节点完全不调用大模型，仅基于分数规则判断。
+     - 判断逻辑：使用服务端归一化后的分数，并综合最低合格分、文档去重、
+       主题/知识点覆盖度和结果数量；阈值按 Collection 配置并通过离线评测校准。
+     - 若结果不足且 iteration < max_iterations：
+        路由回 Rewrite Node（进行下一次检索尝试）。
+     - 若结果充分、达到最大尝试次数或检索服务明确无更多结果：
+        流转至 Generate Node。
+     - 所有分支都必须产生可展示的 Trace 事件；无结果时生成答案必须明确说明依据不足。
+
+  5. Compute Tool Node（Hybrid 分支按需执行）：
+     - 对需要同时讲解和计算、且检测到可计算表达式的问题调用 /compute；若没有
+       可计算表达式可以跳过。将结构化、带来源标记的计算结果写入 AgentState，
+       作为工具结果交给 Generate Node。
+     - 计算超时或不支持时不得阻塞整条链：记录错误并降级为仅 RAG 的解释，明确
+       告知用户未完成的计算部分。
+
+  6. Generate Node (生成答案节点)：
+     - 调用后端 /generate SSE 流式接口。
+     - 将经过长度限制、去重和来源标记的文档拼接为 Context，注入 System Prompt；
+       文档内容视为不可信数据，不能覆盖系统指令。
+     - 实时接收 token chunk、trace、source、error、done 事件并更新 UI；前端
+       应按小块节流渲染 Markdown/LaTeX，不要求服务端逐字符发送。
+
+================================================================================
+五、后端 API 接口契约（版本化、可校验）
+================================================================================
+
+Base URL（开发环境）：http://localhost:8000/v1
+实际路径为 `/v1/rewrite`、`/v1/retrieve`、`/v1/compute`、`/v1/generate` 和
+`/v1/files`；健康检查使用不计入业务版本的 `/health/live` 与 `/health/ready`。
+除 SSE 和 multipart 文件上传外，所有请求和响应使用 UTF-8 JSON；SSE 的每个
+`data` 字段仍为 JSON。
+业务 API 路由统一挂载 `/v1`，health 路由显式例外挂在根路径；前端 API client
+负责拼接路径，避免重复或遗漏版本前缀。
+
+通用约定：
+  1. 所有 JSON 接口使用 Pydantic schema 校验，并限制 query、messages、context、
+     top_k 和图片数量/大小；服务端忽略或拒绝未知的高权限字段。
+  2. 请求可携带 request_id、session_id、agent_run_id、client_version。服务端
+     以用户身份和服务端实际用量计量，不信任客户端传入的 iteration、model、
+     collection 或费用字段；缺少 request_id 时由服务端生成，并在响应头和事件中回传。
+  3. 统一错误格式：
+     {"error":{"code":"...","message":"...","retryable":false,
+     "request_id":"..."}}。错误响应不得泄露堆栈、密钥或内部 Prompt。
+  4. 所有接口必须有超时；只有幂等请求允许有限次数的指数退避重试。客户端
+     取消请求只保证尽快停止后续工作，已经消耗的模型 Token 仍按实际用量计量。
+  5. CORS 来源通过环境变量配置，开发环境允许 http://localhost:3000，生产环境
+     使用明确的白名单；模型供应商密钥只能存在服务端。生产环境需要鉴权时，
+     使用短期 Bearer/cookie 凭据，不能把长期密钥写入 NEXT_PUBLIC_*。
+  6. 对可重放的 POST 请求支持 Idempotency-Key；/generate 以 agent_run_id +
+     request_id 去重，不能因为网络重试重复计费或重复写入会话。
+  7. 常见 HTTP 状态码至少包括 400/401/403/408/413/422/429/500/503，并与统一
+     error.code 对应；触发限流时返回 Retry-After。
+
+-------------------------------------------------------------------------------
+接口 1: POST /rewrite
+-------------------------------------------------------------------------------
+  功能：将口语化问题改写为正式的学术检索语句。
+  Request Body (JSON):
+    {
+      "query": "那个洛必达怎么用的？",
+      "subject": "calculus",
+      "previous_query": "",
+      "missing_aspects": []
+    }
+  Response Body (JSON):
+    {
+      "rewritten_query": "洛必达法则的使用条件与具体步骤",
+      "query_terms": ["洛必达法则", "使用条件", "步骤"]
+    }
+
+-------------------------------------------------------------------------------
+接口 2: POST /retrieve
+-------------------------------------------------------------------------------
+  功能：执行多路召回 + 重排序，返回最相关的 Top-K 文档。
+  Request Body (JSON):
+    {
+      "query": "洛必达法则的使用条件",
+      "top_k": 3,
+      "subject": "calculus",
+      "filters": {"chapter": "导数应用"},
+      "request_id": "..."
+    }
+  Response Body (JSON):
+    {
+      "documents": [
+        {
+          "text": "当极限形式为 0/0 或 ∞/∞ 时，可对分子分母分别求导...",
+          "metadata": {
+            "filename": "chap3_导数应用.pptx",
+            "page": 12,
+            "source_id": "src_abc",
+            "chunk_id": "src_abc_p12_c1",
+            "chapter": "导数应用"
+          },
+          "score": 0.95,
+          "normalized_score": 0.95,
+          "score_type": "calibrated_reranker"
+        }
+      ],
+      "quality_hint": {"qualified_count": 1,"has_more": false},
+      "retrieval_id": "retr_..."
+    }
+  `quality_hint` 仅是服务端诊断信息；本地 Agent 的 Grade 必须根据
+  `normalized_score` 和自身规则重新计算 `is_sufficient`。
+  `score` 可保留供应商原始分数；Grade 只使用服务端校准后的 `normalized_score`
+  （范围 [0,1]）。若没有可比较的校准分数，服务端必须明确标记并避免套用阈值。
+
+-------------------------------------------------------------------------------
+接口 3: POST /compute
+-------------------------------------------------------------------------------
+  功能：执行符号数学计算（使用 Sympy）。
+  Request Body (JSON):
+    {
+      "expression": "integrate(x**2, x)",
+      "timeout_ms": 3000,
+      "request_id": "..."
+    }
+  Response Body (JSON):
+    {
+      "result": "x**3/3 + C",
+      "warnings": []
+    }
+  安全约束：expression 只允许受限 AST、白名单函数/符号和有限复杂度；禁止
+  eval、exec 和不受控的 parse_expr。计算在独立进程或沙箱内执行，超时、内存
+  耗尽或解析失败时返回统一错误，不向客户端暴露堆栈。
+
+-------------------------------------------------------------------------------
+接口 4: POST /generate (流式 SSE)
+-------------------------------------------------------------------------------
+  功能：基于检索到的 Context 生成最终答案，流式返回。
+  Request Body (JSON):
+    {
+      "messages": [
+        {"role": "user", "content": "解释拉格朗日中值定理"}
+      ],
+      "context": "这里是检索到的文档拼接起来的完整上下文...",
+      "images": [],
+      "file_ids": [],
+      "sources": [{"source_id": "src_abc", "citation": "教材.pdf p.12"}],
+      "retrieval_id": "retr_...",
+      "request_id": "..."
+    }
+    messages 的 role 仅允许 user/assistant，系统 Prompt 由服务端维护；images 的
+    元素使用 {"file_id":"...","mime_type":"image/png"}，小图才允许使用
+    {"data":"<base64>","mime_type":"image/png"}。托管模式优先使用 retrieval_id
+    在服务端重建并校验 Context/source，不能仅信任客户端传入的文本和引用。
+  Response（Server-Sent Events 格式）：
+    POST 请求不能使用原生 EventSource，前端必须使用 fetch + ReadableStream 读取。
+    Content-Type 为 text/event-stream，代理不得缓冲；每个事件带 agent_run_id、request_id 和
+    在当前 stream 内单调递增的 seq。Agent 的 agent_run_id 在整张图中固定，
+    每个 HTTP 调用使用独立 request_id；同一调用的重试复用 Idempotency-Key。
+    前端按 (request_id, stream, seq) 去重，不能把本地 Agent 事件和服务端事件混在
+    一个 seq 命名空间。事件类型至少包括：
+
+    event: trace
+    data: {"request_id":"...","stream":"generate","seq":1,"step":"retrieve","status":"running"}
+
+    event: source
+    data: {"request_id":"...","stream":"generate","seq":2,"source_id":"src_abc"}
+
+    event: token
+    data: {"request_id":"...","stream":"generate","seq":3,"content":"拉格"}
+
+    event: error
+    data: {"request_id":"...","stream":"generate","seq":4,"code":"...","message":"...","retryable":false}
+
+    event: done
+    data: {"request_id":"...","stream":"generate","seq":5,"finish":true,"usage":{"input_tokens":123,"output_tokens":456,"retrieval_count":1,"reranker_calls":1,"compute_ms":0}}
+    usage 数值为示例格式，必须由服务端按实际供应商回执填充；无法取得时返回 null
+    并说明原因。
+
+    服务端应定期发送 heartbeat；前端使用 AbortController 取消，服务端支持
+    断开清理。即使客户端断线或未收到 done，服务端也必须在 finally/后台计量流程
+    中记录供应商实际 usage，避免漏计或重试重复计费。Token 以 chunk 推送即可，
+    不要求逐字发送。
+
+-------------------------------------------------------------------------------
+接口 5（文件，必需；MVP 可先限制为图片）: POST /files
+-------------------------------------------------------------------------------
+  功能：以 multipart/form-data 上传回答附件或待索引文档，返回临时 file_id。
+  `purpose=answer_attachment` 时仅处理图片并供 /generate 引用；`purpose=ingest_source`
+  时允许 PDF/PPT，进入异步索引任务，不直接把 PDF 传给生成模型。响应至少包含
+  {"file_id":"...","status":"ready|queued|rejected","expires_at":"...",
+  "job_id":"..."}，queued 任务的状态查询方式必须在 README 中说明。
+  必须校验 MIME、文件大小、页数、哈希和内容类型，并设置过期时间。小图片可以
+  继续以内联 Base64 方式传给 /generate，但默认上限由服务端配置。
+
+-------------------------------------------------------------------------------
+健康检查接口: GET /health/live 与 GET /health/ready
+-------------------------------------------------------------------------------
+  live 只检查进程；ready 检查 Qdrant、模型/provider 和 Collection 维度是否匹配。
+
+================================================================================
+六、前端 UI 交互规范
+================================================================================
+
+【整体布局】
+  1. 左侧边栏：展示历史对话记录列表，顶部放置“新建对话”按钮。
+  2. 顶部导航栏：显示科目下拉选择器（微积分、线性代数、大物、C语言等），
+     切换科目时自动清空当前会话并重置 Agent 状态。
+  3. 中央主区域：上下结构的对话气泡流。用户气泡靠右，AI 气泡靠左。
+  4. 底部固定区域：自动增高输入框 + 功能工具栏。
+
+【关键 UI 组件（必须实现）】
+  1. Trace 面板（执行轨迹）：
+     - 位于 AI 回复气泡的下方，默认折叠，可点击展开。
+     - 以时间线列表展示 Agent 的节点、状态、耗时、重试原因和检索摘要。
+       不展示模型隐藏思维链、系统 Prompt 或服务端敏感信息。
+       示例：Step 1: 🔍 正在改写查询...
+              Step 2: 📚 正在检索第 3 章教材...
+              Step 3: ✅ 信息充足，正在生成回答...
+
+  2. Sources 面板（参考来源）：
+     - 位于 Trace 面板下方，以卡片列表形式展示召回结果（通常为 Top-3；扩展
+       时展示实际返回的 K）。
+     - 每个卡片需包含：source_id、文件名、页码、章节、相关文字预览（高亮命中
+       片段）和可复制的引用标记。托管资料需遵守服务端的片段长度和租户隔离策略。
+
+  3. 公式快捷工具栏：
+     - 在输入框上方提供“Σ”按钮，点击后弹出常用 LaTeX 符号面板。
+     - 必须包含快捷按钮：\frac{}, \int, \sum, \alpha, \beta, \partial 等。
+     - 点击符号后自动插入到输入框光标位置。
+
+【输入与多模态支持】
+  1. 输入框支持 LaTeX 实时预览（输入 $$...$$ 时触发）。
+  2. 支持拖拽或粘贴上传图片（用于手写习题拍照）。
+  3. 小图片可转 Base64 暂存；PDF/大图片先调用 /files，拿到临时 file_id 后在
+     /generate 中传引用。前端必须限制 MIME、大小和数量，并在取消/失败时清理引用。
+
+【流式渲染】
+  1. 对 POST SSE 使用 fetch + ReadableStream（EventSource 仅适用于 GET，不作为
+     本接口实现方案）。处理 trace/token/source/error/done、heartbeat、断线和取消。
+  2. AI 回复区域按 chunk 节流渲染 Markdown 和 LaTeX；未闭合的代码块或公式在
+     流结束前可暂存，避免每个字符都触发完整重排。
+  3. 代码块（如 Python）必须使用语法高亮显示，并附带“复制代码”按钮。
+
+================================================================================
+七、数据摄入（离线索引）策略
+================================================================================
+
+虽然此部分由开发者手动执行，但项目必须提供 ingest.py 脚本。
+
+【处理流程】
+  1. 解析：读取指定目录下的 PPT/PDF。优先提取可用的原生文本、标题、表格和
+     版面坐标；对扫描页、图表和复杂公式渲染为图片，调用多模态模型/OCR 补充
+     结构化 Markdown，并保留解析来源（provenance）和置信度。原生文本与视觉/OCR
+     结果冲突时按明确规则合并并保留两者，不得静默覆盖；公式、单位和数字需做
+     基本一致性校验。解析结果必须可追溯到文件、页码和区域。
+  2. 分块：以标题/段落/公式语义为主、页面边界为辅进行切分（Chunk），避免只按
+     整页切分；每块保留 source_id、chunk_id、页码、章节、版面坐标和 content_hash。
+  3. 增强（HyDE）：可配置地调用模型为 Chunk 生成 0-3 个“假设性问题”，并进行
+     去重、长度限制和质量过滤；资源受限或低价值内容可以跳过。
+     例如：文本讲“牛顿-莱布尼茨公式”，生成的假设性问题可能是
+      “如何计算定积分？”、“牛顿-莱布尼茨公式的使用条件是什么？”。
+  4. 存储：
+     - 将原始文本块和实际生成的假设性问题分别向量化。
+     - 存入 Qdrant 的 named vectors（如 text_dense、question_dense 和可选的
+       bm25_sparse），但归属于同一个 Collection（例如 lecture_math）；融合方式
+       （RRF 或归一化加权）和 Reranker 版本必须记录在索引配置中。
+     - 默认每个 Chunk 产生一个 text_dense 点；HyDE 问题可作为共享 chunk_id 的
+       独立 variant 点，或先聚合成一个 question_dense 向量，二者由配置择一，不能
+       把多个向量无声明地写入同一个普通向量字段。
+  5. 可重复与可恢复：以 tenant/collection、source_id、content_hash、chunk_index、
+     parser_version 和 embedding_model 组合成幂等键，支持增量更新、断点续跑和失败
+     清单；重新索引时不能产生重复 Chunk，也不能跨课程/租户覆盖同名文件。
+
+================================================================================
+八、环境变量配置清单
+================================================================================
+
+【后端 .env 文件】
+  QDRANT_URL=http://localhost:6333       # 宿主机运行 API/ingest 时
+  # Docker Compose 中 API 容器应覆盖为：http://qdrant:6333
+  QDRANT_COLLECTION=lecture_math         # 默认值，实际 subject 映射见下方配置
+  COLLECTION_MAP_FILE=./config/collections.yaml
+  GRADE_THRESHOLDS_FILE=./config/grade_thresholds.yaml
+  MODEL_CACHE_DIR=./models
+  LLM_PROVIDER=openai        # 可选值: openai, local (vLLM)
+  LLM_BASE_URL=              # provider endpoint；local 模式填写 vLLM 地址
+  LLM_MODEL=                 # 生成模型名，由 provider adapter 解析
+  EMBEDDING_MODEL=Qwen3-Embedding-0.6B
+  RERANKER_MODEL=Qwen3-Reranker-0.6B
+  MODEL_DEVICE=auto          # auto/cpu/cuda；dtype/量化由模型配置决定
+  OPENAI_API_KEY=            # 若使用 OpenAI；仅存在服务端环境
+  ALLOWED_ORIGINS=http://localhost:3000
+  MAX_AGENT_ITERATIONS=3     # 服务端硬上限；不得被客户端提高
+  MAX_TOP_K=8
+  REQUEST_CONNECT_TIMEOUT_MS=5000
+  REQUEST_READ_TIMEOUT_MS=30000
+  GENERATE_TOTAL_TIMEOUT_MS=120000
+  COMPUTE_TIMEOUT_MS=3000
+  MAX_CONTEXT_TOKENS=12000
+  MAX_UPLOAD_MB=10
+  GRADE_THRESHOLD_DEFAULT=0.70  # Collection 未配置时的校准 normalized_score
+  API_AUTH_MODE=none         # 生产环境应启用短期 Bearer 或等价机制
+
+  collections.yaml 示例：calculus: lecture_math、physics: lecture_physics。
+  grade_thresholds.yaml 可为每个 Collection 覆盖默认阈值；subject、Collection 和
+  阈值文件均由服务端加载并校验，客户端只能提交 subject 名称。
+
+【前端 .env.local 文件】
+  NEXT_PUBLIC_AI_API_URL=http://localhost:8000/v1
+  NEXT_PUBLIC_MAX_ITERATIONS=3  # 仅作为本地 Agent 默认值，服务端仍是最终上限
+  NEXT_PUBLIC_UPLOAD_MAX_MB=10
+  # 禁止把 OPENAI_API_KEY、QDRANT_API_KEY 等供应商密钥放入 NEXT_PUBLIC_*。
+
+================================================================================
+九、给 Codex / Cursor 的专项构建指令（必读）
+================================================================================
+
+请根据上述全部规格，生成完整的项目代码库。
+
+【后端生成要求】
+  1. 创建 app/ 目录，内部包含：
+     - api/          (存放路由定义，如 rewrite.py, retrieve.py, files.py, health.py)
+     - core/         (存放模型加载类，如 EmbeddingLoader, RerankerLoader)
+     - services/     (存放业务逻辑，如 QdrantService, ComputeService)
+     - schemas/      (Pydantic 请求/响应模型与统一错误结构)
+     - middleware/   (request_id、鉴权、限流和异常处理)
+     - tests/        (单元、接口和 SSE 契约测试)
+  2. 提供 compose 配置启动 Qdrant 和 FastAPI 服务：Qdrant 使用持久化 volume，
+     API 带 healthcheck；重型本地模型可通过 profile/GPU 配置或懒加载启用，不能
+     假设所有开发机启动时都有 GPU 或已下载模型。
+  3. 提供 ingest.py 脚本，用于解析本地 PPT/PDF 文件并灌入向量库。
+  4. 提供 requirements.txt。
+  5. 提供 `.env.example`、索引配置示例和无外部模型依赖的 mock provider，便于
+     在没有 GPU、API Key 或教材的环境下启动并测试接口。
+
+【前端生成要求】
+  1. 使用标准的 Next.js 14 App Router 结构。
+  2. 在 lib/agent.ts 中实现 LangGraph 状态机的完整逻辑。
+  3. 在 hooks/useAgenticChat.ts 中封装 SSE 请求和状态管理。
+  4. 必须包含完整的 Tailwind CSS + Shadcn/ui 配置。
+  5. 对 API 响应使用运行时 schema 校验（如 Zod）；使用 AbortController、事件
+     seq 去重和断线状态恢复，不能把服务端返回的 HTML/Markdown 当作可信脚本执行。
+
+【强行约束（防止翻车）】
+  1. 前端绝对不允许在 package.json 中引入 transformers 或 torch，
+     所有模型调用必须通过 HTTP 请求走后端 API。
+  2. 后端 FastAPI 必须显式添加 CORS 中间件，否则前端跨域请求会失败。
+  3. LaTeX 渲染使用 SSR 安全的动态加载；若 react-katex 渲染失败，必须通过
+     Error Boundary 降级为 MathJax 或纯文本，并对用户内容做安全过滤。
+  4. 所有异步接口必须包含超时设置（Timeouts），避免 Agent 卡死；超时后要
+     释放模型、HTTP 和文件资源并发出可识别的错误事件。
+  5. 服务端必须强制 max_iterations、top_k、context/token、上传大小、计算复杂度
+     和配额上限；客户端不能通过修改 AgentState 绕过这些限制。
+  6. 计算接口禁止 eval/exec；托管 RAG 必须支持租户/课程过滤、来源访问策略和
+     最小必要片段返回。
+  7. 代码文件保持高内聚、低耦合，禁止出现 500 行以上的代码文件（生成的教材
+     或测试 fixture 不受此限制）。
+
+【启动顺序】
+  1. 在终端执行：docker compose up -d qdrant api
+     （Compose 必须为 api 服务注入 QDRANT_URL=http://qdrant:6333；等待
+      `/health/ready` 返回 200；本地模型按配置懒加载或使用 mock provider）
+  2. 执行：python ingest.py --dir ./data/微积分 --collection lecture_math
+     （将测试教材切片入库）
+  3. 在另一个终端执行：npm run dev
+     （启动前端开发服务器，访问 http://localhost:3000）
+  4. 使用 pytest、前端测试和 curl 运行最小契约测试，再进行前后端联调。
+
+================================================================================
+十、最后叮嘱
+================================================================================
+
+请先完成后端 API 服务的完整代码，再编写前端 UI。
+确保每个 API 接口都通过 pytest/接口契约测试和 Postman 或 curl smoke test 后，
+再进行前后端联调；SSE 必须覆盖正常结束、错误、超时和客户端取消场景。
+生成的代码中必须包含详细的 README.md 说明文件，指导开发者如何配置环境
+和运行项目。
+需要一个Markdown文档详细解释项目架构，各个模块和代码文件的作用。
+保持高度模块化、高内聚、低耦合，禁止出现 500 行以上的代码文件。
+
+上线前最低验收项：
+  1. Router 对纯计算、概念解释、混合问题和图片问题的路由测试通过。
+  2. 检索 golden set 至少报告 Recall@K/MRR，并校准 Grade 的 normalized_score
+     阈值；无依据时不会伪造来源。
+  3. 生成答案能够引用 source_id，且 SSE 事件顺序、request_id、usage 和错误
+     格式符合契约。
+  4. 重复摄入同一文件不会产生重复 Chunk；Qdrant/模型未就绪时有明确降级提示。
+  5. 服务端实际用量可按 agent_run_id 追踪，客户端修改状态不会突破配额或安全限制。
+
+开始生成完整的项目代码吧。

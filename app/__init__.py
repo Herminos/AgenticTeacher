@@ -1,0 +1,1 @@
+"""Agentic Teacher FastAPI application."""

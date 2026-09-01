@@ -1,0 +1,20 @@
+@import "katex/dist/katex.min.css";
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: 222 47% 11%;
+  --foreground: 210 40% 98%;
+  --muted: 217 33% 17%;
+  --muted-foreground: 215 20% 65%;
+  --primary: 189 94% 43%;
+  --primary-foreground: 222 47% 11%;
+  --border: 217 33% 22%;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; background: hsl(var(--background)); color: hsl(var(--foreground)); }
+button, textarea, select { font: inherit; }
+.prose code { color: #67e8f9; }
+.prose pre { overflow-x: auto; border: 1px solid hsl(var(--border)); border-radius: .75rem; background: #020617; padding: 1rem; }
