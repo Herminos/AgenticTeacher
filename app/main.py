@@ -5,7 +5,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api import compute, files, generate, health, providers, retrieve, rewrite
+from app.api import compute, files, generate, health, index, providers, retrieve, rewrite
 from app.config import get_settings
 from app.core.telemetry import configure_logging, log_event
 from app.middleware import RequestContextMiddleware
@@ -27,6 +27,7 @@ app.include_router(retrieve.router, prefix="/v1")
 app.include_router(compute.router, prefix="/v1")
 app.include_router(generate.router, prefix="/v1")
 app.include_router(files.router, prefix="/v1")
+app.include_router(index.router, prefix="/v1")
 app.include_router(providers.router, prefix="/v1")
 app.include_router(health.router)
 

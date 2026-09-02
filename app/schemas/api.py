@@ -174,3 +174,26 @@ class GenerateRequest(RequestMeta):
             if not message.get("content"):
                 raise ValueError("message content must not be empty")
         return value
+
+
+class IndexedFileResult(BaseModel):
+    filename: str
+    chunks: int = 0
+    status: Literal["indexed", "skipped", "failed"]
+    error: str | None = None
+
+
+class IndexResponse(BaseModel):
+    index_id: str
+    collection: str
+    subject: str | None = None
+    status: Literal["completed", "partial", "failed"]
+    duration_ms: float
+    files_received: int
+    files_indexed: int
+    chunks: int
+    added_chunks: int
+    hyde_count: int
+    embedding_model: str
+    files: list[IndexedFileResult] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)

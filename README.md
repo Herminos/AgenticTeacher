@@ -128,6 +128,43 @@ NEXT_TELEMETRY_DISABLED=1 npm run build --prefix frontend
 
 若仍出现 `/page` 预渲染错误，请检查新增组件是否在模块顶层访问 `window`、`document` 或 Node 内置模块；浏览器专用逻辑应放在客户端组件或 `next/dynamic(..., { ssr: false })` 加载的模块中。
 
+### Docker 报 `failed to add the host veth... operation not supported`
+
+这不是 API 或 Qdrant 配置错误，而是当前 Linux 内核没有提供 Docker bridge 所需的 `veth` 模块。先确认：
+
+```bash
+test -e /sys/module/veth && echo veth-ok || echo veth-missing
+modprobe veth
+```
+
+如果你刚更新过内核，先检查是否只是尚未重启：
+
+```bash
+uname -r
+pacman -Q linux-zen
+```
+
+运行中的 `uname -r` 必须与已安装内核的版本一致。内核更新后旧内核仍在运行时，`modprobe veth` 会在旧版本的模块目录中找不到文件；重启并在启动菜单选择最新 `linux-zen` 后即可恢复。当前 Arch `linux-zen` 包仍包含 `drivers/net/veth.ko`，这不是近期被移除的功能。
+
+推荐修复是启动一个带 veth 支持的发行版内核（Arch Linux 通常安装并重启到 `linux`/`linux-lts` 内核），然后重启 Docker：
+
+```bash
+sudo pacman -S linux linux-headers   # 或 linux-lts linux-lts-headers
+sudo reboot
+sudo modprobe veth
+sudo systemctl restart docker
+docker compose up -d qdrant api
+```
+
+如果暂时不能更换内核，可使用项目提供的 host-network 备用 Compose。该模式不创建 bridge/veth，API 和 Qdrant 共用主机网络，通常只适用于单机开发：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml -f docker-compose.host.yml up -d qdrant api
+curl http://localhost:8000/health/ready
+```
+
+host-network 模式会牺牲容器网络隔离；恢复正常内核后应回到默认的 `docker-compose.yml`（必要时先执行 `docker compose down`）。
+
 ## API
 
 - `POST /v1/rewrite`：口语查询改写。
@@ -135,11 +172,14 @@ NEXT_TELEMETRY_DISABLED=1 npm run build --prefix frontend
 - `POST /v1/retrieve`：固定召回 Top-15，使用 Qwen3-Reranker-0.6B 重排后只返回 Top-5；开发环境没有 Qdrant 数据时使用确定性的内存 demo 语料。
 - `POST /v1/compute`：受限 AST + 独立进程执行 Sympy，禁止 `eval/exec`。
 - `POST /v1/generate`：POST SSE，前端使用 `fetch + ReadableStream`；事件包括 `trace/source/token/error/done`。
-- `POST /v1/files`：上传回答图片或排队的 PDF/PPT 索引源。
+- `POST /v1/files`：上传回答图片或排队的 PDF/PPT 索引源；`answer_attachment` 默认 10 MB，`ingest_source` 单文件默认 10 GB。
+- `POST /v1/index`：接收浏览器选择的一个或多个 PDF/PPTX/TXT/Markdown 文件，服务端完成解析、分块、嵌入和 Qdrant upsert，并返回索引耗时、文件数、chunk 数和新增数量。
 - `GET /v1/providers`：返回可用模型供应商及默认 Base URL/模型（不返回密钥）。
 - `GET /health/live`、`GET /health/ready`：进程和依赖就绪检查。
 
 前端顶部“模型设置”目前仅支持 Mock、DeepSeek、通义千问 Qwen 和 OpenAI / ChatGPT。模型名称使用按供应商联动的下拉菜单选择，Base URL、Temperature 和个人 API Key 仍可配置。默认模型依据官方文档配置为：DeepSeek `deepseek-v4-pro`（`https://api.deepseek.com`）、Qwen `qwen3.8-max`（DashScope OpenAI-compatible endpoint）和 OpenAI `gpt-5.6-sol`（`https://api.openai.com/v1`）。设置仅保存在当前页面内存中，并随本次请求传给 FastAPI；后端不会把密钥写入日志、Trace、会话或响应。生产环境应使用 HTTPS、短期鉴权，或改为在服务端 `.env` 配置统一密钥。默认 Mock provider 无需任何外部模型即可完成 Rewrite → Retrieve（内存演示语料）→ Grade → Generate 闭环。
+
+前端顶部的“RAG Index”面板支持“选择文件”和“选择目录”（浏览器通过 `webkitdirectory` 提交目录内文件）。文件内容不会在浏览器端解析或向量化；前端仅以 multipart 上传，服务端按当前学科映射到白名单 Collection。索引完成后会显示 `index_id`、Collection、Embedding 模型、处理耗时、文件数、总 chunks 和新增 chunks。单次最多 100 个文件，默认单文件和单次总大小均为 10 GB，可通过 `MAX_INDEX_FILES`、`MAX_INDEX_FILE_MB`、`MAX_INDEX_TOTAL_MB` 和 `INDEX_TIMEOUT_MS` 调整。索引服务会分块流式写入临时磁盘，不会把整个大文件一次性读入内存；请确保 `/tmp` 所在磁盘有足够空间。
 
 ## 本地 Agent
 

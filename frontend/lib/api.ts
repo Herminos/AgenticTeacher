@@ -10,6 +10,8 @@ const rewriteSchema = z.object({rewritten_query: z.string(), query_terms: z.arra
 const assessSchema = z.object({sufficient: z.boolean(), missing_aspects: z.array(z.string()), next_query: z.string(), duration_ms: z.number()});
 const computeSchema = z.object({result: z.string(), warnings: z.array(z.string()).default([]), verified: z.boolean().default(false), duration_ms: z.number().default(0)});
 const providerSchema = z.object({id: z.string(), label: z.string(), base_url: z.string(), model: z.string(), models: z.array(z.string()), kind: z.string()});
+const indexedFileSchema = z.object({filename: z.string(), chunks: z.number(), status: z.enum(["indexed", "skipped", "failed"]), error: z.string().nullable().optional()});
+const indexResponseSchema = z.object({index_id: z.string(), collection: z.string(), subject: z.string().nullable().optional(), status: z.enum(["completed", "partial", "failed"]), duration_ms: z.number(), files_received: z.number(), files_indexed: z.number(), chunks: z.number(), added_chunks: z.number(), hyde_count: z.number(), embedding_model: z.string(), files: z.array(indexedFileSchema), warnings: z.array(z.string())});
 
 async function fetchJson<T>(path: string, body: unknown, schema: z.ZodSchema<T>, signal?: AbortSignal): Promise<T> {
   const controller = new AbortController();
@@ -48,6 +50,21 @@ export async function upload(file: File, purpose: "answer_attachment" | "ingest_
   const data = await response.json();
   if (!response.ok) throw new Error(data?.error?.message || data?.detail?.message || "文件上传失败");
   return z.object({file_id: z.string(), status: z.string(), expires_at: z.string(), job_id: z.string().nullable().optional()}).parse(data);
+}
+
+export type IndexResult = z.infer<typeof indexResponseSchema>;
+
+export async function indexFiles(files: File[], subject: string, hydeCount = 0, signal?: AbortSignal): Promise<IndexResult> {
+  const form = new FormData();
+  files.forEach((file) => form.append("files", file, (file as File & {webkitRelativePath?: string}).webkitRelativePath || file.name));
+  form.append("subject", subject);
+  form.append("hyde_count", String(Math.max(0, Math.min(3, Math.floor(hydeCount)))));
+  const response = await fetch(`${baseUrl}/index`, {method: "POST", body: form, signal});
+  if (!response.ok) {
+    const error = await responseError(response, `RAG Index 失败（HTTP ${response.status}）`);
+    throw error;
+  }
+  return indexResponseSchema.parse(await response.json());
 }
 
 async function responseError(response: Response, fallback: string): Promise<Error> {

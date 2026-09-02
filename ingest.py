@@ -77,7 +77,12 @@ def build_rows(directory: Path, hyde_count: int = 0) -> list[dict]:
     for path in sorted(directory.rglob("*")):
         if not path.is_file() or path.suffix.lower() not in {".pdf", ".pptx", ".txt", ".md", ".markdown"}:
             continue
-        source_id = hashlib.sha256(str(path.resolve()).encode("utf-8")).hexdigest()[:16]
+        # Derive the source id from stable logical path + file content, not the
+        # temporary upload directory. Re-uploading the same document therefore
+        # remains idempotent across browser indexing runs.
+        relative_name = path.relative_to(directory).as_posix()
+        file_digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        source_id = hashlib.sha256(f"{relative_name}\0{file_digest}".encode("utf-8")).hexdigest()[:16]
         for page, text in _read_pages(path):
             for chunk_index, chunk in enumerate(_chunks(text), start=1):
                 content_hash = hashlib.sha256(chunk.encode("utf-8")).hexdigest()

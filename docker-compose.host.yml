@@ -1,0 +1,13 @@
+# Fallback for hosts whose kernel does not provide the veth module.
+# Host networking removes container DNS isolation; API is explicitly pointed at
+# Qdrant on 127.0.0.1. Prefer the default bridge compose on a normal Docker host.
+services:
+  qdrant:
+    network_mode: host
+    ports: !reset []
+
+  api:
+    network_mode: host
+    ports: !reset []
+    environment:
+      QDRANT_URL: http://127.0.0.1:6333

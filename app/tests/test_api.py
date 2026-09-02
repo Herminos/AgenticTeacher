@@ -116,6 +116,54 @@ async def test_generate_sse_contract() -> None:
     assert "event: done" in response.text
 
 
+async def test_rag_index_upload_returns_statistics(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.api.index import service as index_service
+    from app.schemas import IndexResponse
+
+    async def fake_index(files, subject, hyde_count, request_id=None):
+        assert len(files) == 1
+        assert subject == "calculus"
+        return IndexResponse(
+            index_id="idx_test",
+            collection="lecture_math",
+            subject=subject,
+            status="completed",
+            duration_ms=2,
+            files_received=1,
+            files_indexed=1,
+            chunks=1,
+            added_chunks=1,
+            hyde_count=hyde_count,
+            embedding_model="Qwen/Qwen3-Embedding-0.6B",
+        )
+
+    monkeypatch.setattr(index_service, "index", fake_index)
+    response = await request(
+        "POST",
+        "/v1/index",
+        data={"subject": "calculus", "hyde_count": "1"},
+        files={"files": ("chapter.md", "## 极限\n\n洛必达法则用于 0/0 型极限。".encode("utf-8"), "text/markdown")},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "completed"
+    assert body["files_received"] == 1
+    assert body["files_indexed"] == 1
+    assert body["chunks"] >= 1
+    assert body["added_chunks"] == body["chunks"]
+
+
+async def test_rag_index_rejects_unsupported_file() -> None:
+    response = await request(
+        "POST",
+        "/v1/index",
+        data={"subject": "calculus"},
+        files={"files": ("notes.exe", b"not a document", "application/octet-stream")},
+    )
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "INDEX_REJECTED"
+
+
 async def test_generate_rejects_empty_assistant_placeholder() -> None:
     response = await request(
         "POST",

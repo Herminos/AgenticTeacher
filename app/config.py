@@ -51,6 +51,12 @@ class Settings(BaseSettings):
     max_image_count: int = 4
     max_inline_image_bytes: int = 5 * 1024 * 1024
     files_dir: str = "/tmp/agentic_teacher_files"
+    max_index_files: int = 100
+    # RAG indexing accepts large textbook files.  Keep this separate from
+    # max_upload_mb, which protects small answer attachments sent to /files.
+    max_index_file_mb: int = 10240
+    max_index_total_mb: int = 10240
+    index_timeout_ms: int = 600000
 
     model_config = SettingsConfigDict(
         env_file=".env",

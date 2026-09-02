@@ -15,7 +15,8 @@ FastAPI /v1（可信执行与计量边界）
   ├─ Hugging Face Qwen3 Embedding + Qwen3 Reranker（PyTorch/CUDA 懒加载）
   ├─ Qdrant dense 检索与内存降级
   ├─ Sympy 受限 AST + 进程超时
-  ├─ /files 临时文件与索引任务
+  ├─ /files 临时文件与回答附件
+  ├─ /index 浏览器上传后的服务端 RAG 索引
   └─ request_id、配额、usage、统一错误
         ▼
       Qdrant（持久化向量与 payload）
@@ -30,7 +31,7 @@ FastAPI /v1（可信执行与计量边界）
 - `app/core/device.py`：统一解析 CPU/CUDA 与 FP32/FP16/BF16，配置 PyTorch 推理优化，并向 ready 暴露运行时和 GPU 信息。
 - `app/schemas/`：Pydantic 请求/响应模型，限制消息角色、查询长度、图片和 top-k。
 - `app/middleware/request_context.py`：生成/传播 `X-Request-ID`。
-- `app/api/`：rewrite、retrieve、compute、generate、files 和 health 路由。
+- `app/api/`：rewrite、retrieve、compute、generate、files、index 和 health 路由。
 - `app/services/model_provider.py`：云端 provider adapter；强制 JSON Rewrite/Assess schema，Mock provider 确保无外部依赖时可运行。
 - `app/services/hf_models.py`：懒加载 `Qwen/Qwen3-Embedding-0.6B` 和 `Qwen/Qwen3-Reranker-0.6B`；Reranker 按官方 yes/no logits 计算相关性概率。
 - `app/services/qdrant_service.py`：使用 Qwen3 Embedding 对文档/查询编码，动态按 hidden size 创建 `text_dense` Collection，并保留确定性的内存 demo 语料降级。
@@ -38,7 +39,8 @@ FastAPI /v1（可信执行与计量边界）
 - `app/services/compute_service.py`：AST 白名单、复杂度限制、独立进程和超时终止。
 - `app/services/file_service.py`：MIME/大小校验、临时文件、哈希和过期时间。
 - `app/services/usage_service.py`：演示用内存账本；生产替换为持久化计量系统。
-- `ingest.py`：解析、结构化分块、HyDE、幂等 manifest 和摄入入口。
+- `ingest.py`：解析、结构化分块、HyDE、稳定 source/chunk ID、幂等 manifest 和摄入入口。
+- `app/services/index_service.py`：接收 multipart 文件，执行服务端临时落盘、解析、分块、嵌入和 Qdrant upsert，返回耗时及统计信息；不把文件正文或向量化逻辑放到浏览器。
 - `scripts/download_models.py`：从 Hugging Face 断点下载两个中文模型到 `MODEL_CACHE_DIR`。
 
 ## GPU 执行边界
