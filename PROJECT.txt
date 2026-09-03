@@ -2,7 +2,7 @@
         理工科全科目 Agentic RAG 智能教学系统 - 完整技术规格说明书
 ================================================================================
 
-文档版本：1.2（LightRAG 迁移版）
+文档版本：1.3（LightRAG 父子块版）
 本版修订原则：保留“本地 LangGraph Agent + FastAPI 模型/RAG 服务”的核心架构，
 将自研 RAG 索引/检索实现全面替换为官方 LightRAG（lightrag-hku）并以 Qdrant 作为
 向量后端；仅收紧接口、数据、安全、部署和测试等工程边界；本地 Agent 仍可独立开源和替换。
@@ -204,9 +204,10 @@
      - 功能：执行多路召回（向量检索 + BM25 关键词检索），
        分别查询对应的 named vector，再按 chunk_id 使用 RRF/归一化权重融合，
        然后调用 Reranker 模型对去重后的候选进行精排。
-     - 输出：默认返回精排后的 Top-3 文档片段；服务端可在上限内按覆盖度扩展
-       Top-K，并在返回前按 chunk_id 去重，返回归一化分数、score_type、chunk_id
-       和引用元数据。
+     - 输出：先按配置召回子块候选，再固定选取 Reranker 排名前 4 的子块；仅将
+       这 4 个子块映射到的完整父块作为资料，并按 parent_id 去重。父块总数量不
+       另设独立 TopK，实际为 1–4 个；返回归一化分数、score_type、child_id、
+       parent_id 和引用元数据。
 
   4. Grade Node (充分性判断节点)：
      - 重要约束：此节点完全不调用大模型，仅基于分数规则判断。
@@ -428,7 +429,7 @@ Base URL（开发环境）：http://localhost:8000/v1
 
 【关键 UI 组件（必须实现）】
   1. Trace 面板（执行轨迹）：
-     - 位于 AI 回复气泡的下方，默认折叠，可点击展开。
+     - 位于本次 AI 回复的 Agent 流程区域，默认折叠，可点击展开。
      - 以时间线列表展示 Agent 的节点、状态、耗时、重试原因和检索摘要。
        不展示模型隐藏思维链、系统 Prompt 或服务端敏感信息。
        示例：Step 1: 🔍 正在改写查询...
@@ -436,8 +437,8 @@ Base URL（开发环境）：http://localhost:8000/v1
               Step 3: ✅ 信息充足，正在生成回答...
 
   2. Sources 面板（参考来源）：
-     - 位于 Trace 面板下方，以卡片列表形式展示召回结果（通常为 Top-3；扩展
-       时展示实际返回的 K）。
+     - 位于 Agent 流程区域内部、最终回答之前，以卡片列表展示 Reranker 前 4 个
+       子块所映射出的去重父块；检索成功后立即更新，不能依赖生成成功才显示。
      - 每个卡片需包含：source_id、文件名、页码、章节、相关文字预览（高亮命中
        片段）和可复制的引用标记。托管资料需遵守服务端的片段长度和租户隔离策略。
 
@@ -471,8 +472,13 @@ Base URL（开发环境）：http://localhost:8000/v1
      结构化 Markdown，并保留解析来源（provenance）和置信度。原生文本与视觉/OCR
      结果冲突时按明确规则合并并保留两者，不得静默覆盖；公式、单位和数字需做
      基本一致性校验。解析结果必须可追溯到文件、页码和区域。
-  2. 分块：以标题/段落/公式语义为主、页面边界为辅进行切分（Chunk），避免只按
-     整页切分；每块保留 source_id、chunk_id、页码、章节、版面坐标和 content_hash。
+  2. 分块：采用父子块（parent-child）策略。Markdown 优先使用轻量级 AST 解析器
+     识别标题、段落、公式、列表、表格和代码块，先以 Markdown 标题/教材小节为主、
+     段落和页面边界为辅生成父块；无标题的文本按段落聚合，父块默认上限约 8192
+     字符。每个父块再切分为默认 512 字符的子块，只有子块进入 LightRAG 向量索引。
+     子块必须保存稳定的 child_id -> parent_id 映射及 source_id、chunk_id、页码、
+     章节、版面坐标和 content_hash。查询时使用子块向量召回和重排，但结果按映射
+     去重并返回完整父块，保证公式、定义和上下文不因切片边界丢失。
   3. 增强（HyDE）：可配置地调用模型为 Chunk 生成 0-3 个“假设性问题”，并进行
      去重、长度限制和质量过滤；资源受限或低价值内容可以跳过。
      例如：文本讲“牛顿-莱布尼茨公式”，生成的假设性问题可能是
@@ -485,8 +491,10 @@ Base URL（开发环境）：http://localhost:8000/v1
        workspace + doc_id 做 subject/文件隔离；JSON/KV 与 NetworkX（或配置的图存储）
        保存文档、状态、图谱和缓存。
      - 查询统一调用 LightRAG `aquery_data`/`aquery`，默认使用 hybrid/naive 模式及
-       `QueryParam` 的 chunk_top_k；Qwen Reranker 通过 `rerank_model_func` 注入，最终
-       TopK 由服务端配置控制。返回结果必须映射回原始 metadata，不能伪造来源。
+       `QueryParam` 的 chunk_top_k；Qwen Reranker 通过 `rerank_model_func` 注入，先
+       对子块候选精排，固定取前 4 个子块，再按 child_id -> parent_id 映射和去重。
+       父块没有额外数量限制，只由这 4 个子块实际对应的父块决定。
+       返回结果必须映射回原始 metadata 和完整父块正文，不能伪造来源。
      - 若启用 HyDE，只能通过 LightRAG 支持的 query/insert 扩展点实现，并记录版本、
        参数和耗时；不得在 Qdrant 外另建未声明的 question_dense 点。
   5. 可重复与可恢复：以 tenant/collection、source_id、content_hash、chunk_index、

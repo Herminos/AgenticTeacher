@@ -82,7 +82,11 @@ class EvidenceDocument(BaseModel):
 class AssessRequest(RequestMeta):
     query: str = Field(min_length=1, max_length=4000)
     rewritten_query: str = Field(min_length=1, max_length=4000)
-    documents: list[EvidenceDocument] = Field(default_factory=list, max_length=5)
+    # Retrieval TopK is configurable up to the service limit. The provider
+    # adapter still sends only its highest-ranked five parents to the cloud
+    # reviewer, but accepting the larger request prevents a 422 when clients
+    # use a wider UI TopK.
+    documents: list[EvidenceDocument] = Field(default_factory=list, max_length=32)
     attempt: int = Field(ge=1, le=3)
     llm: LLMConfig | None = None
 
@@ -188,6 +192,8 @@ class GenerateRequest(RequestMeta):
 class IndexedFileResult(BaseModel):
     filename: str
     chunks: int = 0
+    parent_count: int = 0
+    child_count: int = 0
     status: Literal["indexed", "skipped", "failed"]
     error: str | None = None
     file_id: str | None = None
@@ -216,8 +222,8 @@ class IndexResponse(BaseModel):
 
 class RagSettingsUpdate(BaseModel):
     chunk_chars: int | None = Field(default=None, ge=128, le=8192)
-    retrieval_top_k: int | None = Field(default=None, ge=1, le=64)
-    reranker_top_k: int | None = Field(default=None, ge=1, le=32)
+    retrieval_top_k: int | None = Field(default=None, ge=4, le=64)
+    reranker_top_k: Literal[4] | None = None
 
 
 class RagSettingsResponse(BaseModel):
@@ -235,6 +241,8 @@ class RagFileResponse(BaseModel):
     size_bytes: int = 0
     content_hash: str = ""
     chunks: int = 0
+    parent_count: int = 0
+    child_count: int = 0
     chunk_chars: int = 512
     retrieval_top_k: int = 16
     reranker_top_k: int = 4
@@ -255,6 +263,11 @@ class RagChunkResponse(BaseModel):
     content_hash: str = ""
     parser_version: str = ""
     text: str = ""
+    child_id: str | None = None
+    parent_id: str | None = None
+    parent_text: str = ""
+    child_chars: int = 0
+    parent_chars: int = 0
 
 
 class RagFileDetailResponse(RagFileResponse):

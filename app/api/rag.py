@@ -44,6 +44,9 @@ async def get_index(file_id: str, offset: int = Query(default=0, ge=0), limit: i
     if status:
         record["status"] = status["status"]
         record["chunks"] = status["chunks"]
+        # Child chunks are the LightRAG document units. Keep the registry
+        # count synchronized after per-child deletion or a resumed operation.
+        record["child_count"] = status["chunks"]
     return RagFileDetailResponse(**record, chunk_items=chunks, chunk_offset=offset, chunk_limit=limit)
 
 
@@ -56,6 +59,9 @@ async def delete_chunk(file_id: str, chunk_id: str, request: Request) -> dict:
     if not deleted:
         raise HTTPException(status_code=404, detail={"code": "RAG_CHUNK_NOT_FOUND", "message": "RAG chunk not found", "retryable": False})
     record["chunks"] = max(0, int(record.get("chunks", 0)) - 1)
+    record["child_count"] = max(0, int(record.get("child_count", record["chunks"] + 1)) - 1)
+    if isinstance(record.get("child_ids"), dict):
+        record["child_ids"].pop(chunk_id, None)
     registry.upsert_file(record)
     log_event("rag_chunk_delete", request_id=request.state.request_id, stage="rag_management", status="succeeded", file_id=file_id)
     return {"file_id": file_id, "chunk_id": chunk_id, "deleted": True}

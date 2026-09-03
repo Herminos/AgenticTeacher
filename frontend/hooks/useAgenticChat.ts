@@ -30,6 +30,7 @@ export const useAgenticChat = create<ChatState>()(persist((set, get) => ({
       const result = await runAgent({
         query, subject, fileIds, modelConfig, messages: conversation, signal: activeController.signal,
         onEvent: (event) => set((state) => ({trace: [...state.trace, event]})),
+        onDocuments: (documents) => set({documents}),
         onToken: (text) => set((state) => {
           const messages = [...state.messages]; const last = messages[messages.length - 1];
           messages[messages.length - 1] = {...last, content: `${last?.content || ""}${text}`}; return {messages};

@@ -8,6 +8,7 @@ qdrant-client==1.13.2
 lightrag-hku==1.5.7
 sympy==1.13.3
 httpx==0.28.1
+markdown-it-py>=3.0,<5
 # Local Chinese RAG models (lazy-loaded; PyTorch 2.7+ supports RTX 50-series/Blackwell)
 torch>=2.7,<3
 transformers>=4.57,<5

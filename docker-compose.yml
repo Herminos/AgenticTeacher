@@ -24,8 +24,8 @@ services:
       MODEL_CACHE_DIR: /app/models
       HF_EMBEDDING_MODEL: ${HF_EMBEDDING_MODEL:-Qwen/Qwen3-Embedding-0.6B}
       RERANKER_MODEL: ${RERANKER_MODEL:-Qwen/Qwen3-Reranker-0.6B}
-      HF_ENABLE_LOCAL_MODELS: ${HF_ENABLE_LOCAL_MODELS:-false}
-      HF_ENABLE_RERANKER: ${HF_ENABLE_RERANKER:-false}
+      HF_ENABLE_LOCAL_MODELS: ${HF_ENABLE_LOCAL_MODELS:-true}
+      HF_ENABLE_RERANKER: ${HF_ENABLE_RERANKER:-true}
       HF_LOCAL_FILES_ONLY: ${HF_LOCAL_FILES_ONLY:-false}
       MODEL_DEVICE: ${MODEL_DEVICE:-auto}
       MODEL_DTYPE: ${MODEL_DTYPE:-auto}
@@ -53,7 +53,8 @@ services:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready')"]
       interval: 10s
       timeout: 5s
-      retries: 12
+      retries: 60
+      start_period: 20s
 
 volumes:
   qdrant_storage:

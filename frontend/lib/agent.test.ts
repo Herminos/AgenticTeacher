@@ -66,4 +66,35 @@ describe("local agent routing contract", () => {
       undefined,
     );
   });
+
+  it("sends only complete parent blocks within review and generation limits", async () => {
+    api.rewrite.mockResolvedValue({rewritten_query: "麦克斯韦方程组", query_terms: ["麦克斯韦"], should_retrieve: true, duration_ms: 1});
+    api.retrieve.mockResolvedValue({
+      documents: Array.from({length: 20}, (_, index) => ({
+        text: `父块-${index}`,
+        metadata: {source_id: `source-${index}`, chunk_id: `child-${index}`, parent_id: `parent-${index}`, block_type: "parent"},
+        normalized_score: 0.9,
+      })),
+      retrieval_id: "retr_parent",
+      quality_hint: {qualified_count: 20, has_more: false, candidate_count: 20, reranked_count: 20, retrieval_ms: 1, reranker_ms: 1},
+    });
+    api.assess.mockResolvedValue({sufficient: true, missing_aspects: [], next_query: "", duration_ms: 1});
+    const {runAgent} = await import("./agent");
+    await runAgent({query: "麦克斯韦方程组", subject: "physics", modelConfig: {provider: "mock"}});
+    expect(api.assess.mock.calls[0][0].documents).toHaveLength(5);
+    expect(api.assess.mock.calls[0][0].documents[0].text).toBe("父块-0");
+    expect(api.streamGenerate.mock.calls[0][0].sources).toHaveLength(16);
+  });
+
+  it("publishes retrieved parents before generation so failures do not hide them", async () => {
+    const parent = {text: "完整父块", metadata: {source_id: "source", chunk_id: "child", parent_id: "parent", child_text: "命中子块"}, normalized_score: 0.9};
+    api.rewrite.mockResolvedValue({rewritten_query: "教学查询", query_terms: ["教学"], should_retrieve: true, duration_ms: 1});
+    api.retrieve.mockResolvedValue({documents: [parent], retrieval_id: "retr_parent", quality_hint: {qualified_count: 1, has_more: false, candidate_count: 16, reranked_count: 1, retrieval_ms: 1, reranker_ms: 1}});
+    api.assess.mockResolvedValue({sufficient: true, missing_aspects: [], next_query: "", duration_ms: 1});
+    api.streamGenerate.mockRejectedValue(new Error("generation failed"));
+    const onDocuments = vi.fn();
+    const {runAgent} = await import("./agent");
+    await expect(runAgent({query: "问题", subject: "physics", modelConfig: {provider: "mock"}, onDocuments})).rejects.toThrow("generation failed");
+    expect(onDocuments).toHaveBeenCalledWith([parent]);
+  });
 });

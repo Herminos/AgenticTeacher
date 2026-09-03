@@ -7,10 +7,16 @@ optional ML dependencies or model weights are not installed.
 import asyncio
 from functools import lru_cache
 from threading import Lock
+from time import perf_counter
 from typing import Any
 
 from app.config import get_settings
 from app.core.device import configure_torch, resolve_device, resolve_dtype
+from app.core.telemetry import log_event
+
+
+_runtime_lock = Lock()
+_runtime: dict[str, Any] = {"status": "not_started", "error": None}
 
 
 def _model_ref(model_id: str, cache_dir: str, local_only: bool) -> str:
@@ -51,6 +57,7 @@ class HFEmbeddingModel:
             )
             tokenizer = AutoTokenizer.from_pretrained(
                 model_ref,
+                padding_side="left",
                 cache_dir=settings.model_cache_dir,
                 local_files_only=settings.hf_local_files_only,
                 trust_remote_code=settings.hf_trust_remote_code,
@@ -77,19 +84,29 @@ class HFEmbeddingModel:
         self._load()
         torch = self._torch
         settings = get_settings()
-        prefixes = "Represent this query for searching relevant passages: " if is_query else ""
+        instruction = (
+            "Given a Chinese university STEM question, retrieve textbook passages that directly answer it, "
+            "prioritizing exact terminology, definitions, and equations."
+        )
+        prepared = [f"Instruct: {instruction}\nQuery: {text}" for text in texts] if is_query else texts
         inputs = self.tokenizer(
-            [prefixes + text for text in texts],
+            prepared,
             padding=True,
             truncation=True,
-            max_length=512,
+            max_length=2048,
             return_tensors="pt",
         )
         inputs = {key: value.to(self.device) for key, value in inputs.items()}
         with torch.inference_mode():
             output = self.model(**inputs).last_hidden_state
-        mask = inputs["attention_mask"].unsqueeze(-1).expand(output.size()).float()
-        pooled = (output * mask).sum(1) / mask.sum(1).clamp(min=1e-9)
+        attention_mask = inputs["attention_mask"]
+        if bool((attention_mask[:, -1].sum() == attention_mask.shape[0]).item()):
+            pooled = output[:, -1]
+        else:
+            sequence_lengths = attention_mask.sum(dim=1) - 1
+            pooled = output[
+                torch.arange(output.shape[0], device=output.device), sequence_lengths
+            ]
         pooled = torch.nn.functional.normalize(pooled, p=2, dim=1)
         return pooled.cpu().tolist()
 
@@ -207,3 +224,62 @@ async def rerank_texts(query: str, documents: list[str]) -> list[float]:
     if not documents:
         return []
     return await asyncio.to_thread(get_reranker_model().score, query, documents)
+
+
+def hf_runtime_status() -> dict[str, Any]:
+    settings = get_settings()
+    with _runtime_lock:
+        status = dict(_runtime)
+    embedding = get_embedding_model()
+    reranker = get_reranker_model()
+    status.update(
+        enabled=settings.hf_enable_local_models and settings.hf_enable_reranker,
+        embedding_loaded=embedding.model is not None,
+        reranker_loaded=reranker.model is not None,
+        embedding_device=embedding.device if embedding.model is not None else None,
+        reranker_device=reranker.device if reranker.model is not None else None,
+        embedding_dimension=embedding.dimension,
+        embedding_model=settings.hf_embedding_model,
+        reranker_model=settings.reranker_model_ref,
+    )
+    return status
+
+
+async def warmup_hf_models() -> None:
+    """Load and execute both Qwen models once so readiness reflects reality."""
+    settings = get_settings()
+    if not settings.hf_enable_local_models or not settings.hf_enable_reranker:
+        with _runtime_lock:
+            _runtime.update(status="disabled", error="Qwen embedding or reranker is disabled")
+        return
+    with _runtime_lock:
+        if _runtime["status"] in {"loading", "ready"}:
+            return
+        _runtime.update(status="loading", error=None)
+    started = perf_counter()
+    try:
+        vectors = await embed_texts(["麦克斯韦方程组"], is_query=True)
+        scores = await rerank_texts("麦克斯韦方程组", ["麦克斯韦方程组描述电磁场规律。"])
+        if len(vectors) != 1 or not vectors[0] or len(scores) != 1:
+            raise RuntimeError("model warmup returned an invalid result")
+        with _runtime_lock:
+            _runtime.update(status="ready", error=None)
+        log_event(
+            "hf_models_ready",
+            stage="model_warmup",
+            status="succeeded",
+            duration_ms=round((perf_counter() - started) * 1000, 2),
+            embedding_model=settings.hf_embedding_model,
+            reranker_model=settings.reranker_model_ref,
+        )
+    except Exception as exc:
+        with _runtime_lock:
+            _runtime.update(status="failed", error=str(exc)[:300])
+        log_event(
+            "hf_models_failed",
+            level="ERROR",
+            stage="model_warmup",
+            status="failed",
+            duration_ms=round((perf_counter() - started) * 1000, 2),
+            error=str(exc)[:300],
+        )

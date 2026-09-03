@@ -44,8 +44,8 @@ FastAPI /v1（可信执行与计量边界）
 - `app/services/file_service.py`：MIME/大小校验、临时文件、哈希和过期时间。
 - `app/services/usage_service.py`：演示用内存账本；生产替换为持久化计量系统。
 - `ingest.py`：保留 dry-run/兼容 manifest；实际摄入入口直接交给 LightRAG。
-- `app/services/index_service.py`：接收 multipart 文件，执行服务端临时落盘和解析结果交给 LightRAG pipeline，返回文档状态及统计信息；不把文件正文或向量化逻辑放到浏览器。
-- `app/services/rag_registry.py`：持久化 LightRAG workspace/doc_id、文件哈希、Chunk 统计和运行时 RAG 参数。
+- `app/services/index_service.py`：接收 multipart 文件，执行服务端临时落盘和解析；先按教材小节生成父块，再将每个父块切成默认 512 字符子块，调用 LightRAG `ainsert_custom_chunks` 建立子块向量索引，并返回文档状态及父/子块统计；不把文件正文或向量化逻辑放到浏览器。
+- `app/services/rag_registry.py`：持久化 LightRAG workspace/doc_id、文件哈希、父块正文、child_id → parent_id 映射、Chunk 统计和运行时 RAG 参数。
 - `app/api/rag.py`：RAG 管理设置、文件列表/详情、Chunk 查询和删除接口。
 - `scripts/download_models.py`：从 Hugging Face 断点下载两个中文模型到 `MODEL_CACHE_DIR`。
 
@@ -77,4 +77,4 @@ NVIDIA 内核驱动，驱动设备与库由运行时注入；Python 依赖中的
 
 ## 生产替换点
 
-当前链路为“LightRAG workspace/doc_id 隔离 → Qwen Embedding → LightRAG hybrid/naive 检索 → Qwen Reranker Top-4 → 云端证据评估 → 最多三轮反思 → Provider 生成”。服务端按 `agent_run_id` 强制三轮上限；三轮不足时记录 warning、插入用户可见声明并允许模型使用通用知识。首次使用前运行 `python scripts/download_models.py --cache-dir ./models`，并在 GPU 部署设置 `HF_LOCAL_FILES_ONLY=true`、`HF_ENABLE_RERANKER=true`。
+当前链路为“父块生成 → 子块切分 → LightRAG workspace/doc_id 隔离 → Qwen Embedding（子块）→ LightRAG hybrid/naive 检索 → Qwen Reranker 固定选取前 4 个子块 → 映射并去重为 1–4 个完整父块（无额外父块 TopK）→ 云端证据评估 → 最多三轮反思 → Provider 生成”。检索成功后父块通过 `onDocuments` 立即进入前端 Agent 流程面板，不依赖 Generate 成功。服务端按 `agent_run_id` 强制三轮上限；三轮不足时记录 warning、插入用户可见声明并允许模型使用通用知识。首次使用前运行 `python scripts/download_models.py --cache-dir ./models`，并在 GPU 部署设置 `HF_LOCAL_FILES_ONLY=true`、`HF_ENABLE_RERANKER=true`。

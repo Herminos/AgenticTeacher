@@ -53,7 +53,9 @@ class RagRegistry:
         defaults = {
             "chunk_chars": settings.rag_chunk_chars,
             "retrieval_top_k": settings.retrieval_candidate_k,
-            "reranker_top_k": settings.reranker_top_k,
+            # The parent-child retrieval contract always selects the best four
+            # reranked child chunks and expands those children to parents.
+            "reranker_top_k": 4,
         }
         with self._lock:
             saved = self._read().get("settings", {})
@@ -61,14 +63,17 @@ class RagRegistry:
             value = saved.get(key)
             if isinstance(value, int):
                 defaults[key] = value
+        defaults["chunk_chars"] = max(128, min(8192, defaults["chunk_chars"]))
+        defaults["retrieval_top_k"] = max(4, min(64, settings.max_top_k, defaults["retrieval_top_k"]))
+        defaults["reranker_top_k"] = 4
         return defaults
 
     def update_runtime_settings(self, values: dict[str, int]) -> dict[str, int]:
         settings = get_settings()
         bounds = {
             "chunk_chars": (128, 8192),
-            "retrieval_top_k": (1, min(64, settings.max_top_k)),
-            "reranker_top_k": (1, min(32, settings.max_top_k)),
+            "retrieval_top_k": (4, min(64, settings.max_top_k)),
+            "reranker_top_k": (4, 4),
         }
         with self._lock:
             payload = self._read()

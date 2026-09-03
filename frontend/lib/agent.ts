@@ -4,7 +4,7 @@ import {Annotation, END, START, StateGraph} from "@langchain/langgraph/web";
 import {assess, compute, retrieve, rewrite, streamGenerate} from "./api";
 import type {ChatMessage, DocumentItem, ModelConfig, Route, TraceEvent} from "./types";
 
-export interface AgentInput {query: string; subject: string; messages?: ChatMessage[]; fileIds?: string[]; modelConfig?: ModelConfig; signal?: AbortSignal; onEvent?: (event: TraceEvent) => void; onToken?: (text: string) => void; onSource?: (sourceId: string) => void;}
+export interface AgentInput {query: string; subject: string; messages?: ChatMessage[]; fileIds?: string[]; modelConfig?: ModelConfig; signal?: AbortSignal; onEvent?: (event: TraceEvent) => void; onDocuments?: (documents: DocumentItem[]) => void; onToken?: (text: string) => void; onSource?: (sourceId: string) => void;}
 export interface AgentResult {route: Route; final_answer: string; documents: DocumentItem[]; rewritten_query: string; trace: TraceEvent[]; retrieval_id?: string; compute_result?: {result: string; warnings: string[]; verified: boolean};}
 
 const MAX_ITERATIONS = Math.max(1, Math.min(3, Number(process.env.NEXT_PUBLIC_MAX_ITERATIONS || 3)));
@@ -89,17 +89,26 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
   } else {
     add("rewrite", "succeeded", rewritten, undefined, rewrittenResponse.duration_ms);
     for (let attempt = 1; attempt <= MAX_ITERATIONS; attempt += 1) {
-      add("retrieve", "running", `第 ${attempt}/3 轮：召回配置数量并使用 Qwen Reranker 精排...`);
+      add("retrieve", "running", `第 ${attempt}/3 轮：召回子块并使用 Qwen Reranker 精排...`);
       const retrieved = await retrieve({query: rewritten, ...common}, input.signal);
       retrievalAttempts = attempt;
       documents = retrieved.documents as DocumentItem[]; retrievalId = retrieved.retrieval_id;
+      // Publish each successful retrieval immediately. The UI can therefore
+      // show the selected parent blocks inside the Agent flow even if the
+      // subsequent cloud generation request fails.
+      input.onDocuments?.(documents);
       const retrievalDuration = retrieved.quality_hint.retrieval_ms + retrieved.quality_hint.reranker_ms;
-      add("retrieve", "succeeded", `召回 ${retrieved.quality_hint.candidate_count} 条，精排后保留 ${documents.length} 条`, undefined, retrievalDuration);
+      add("retrieve", "succeeded", `召回 ${retrieved.quality_hint.candidate_count} 个子块候选，重排前 4 个子块映射为 ${documents.length} 个父块`, undefined, retrievalDuration);
       add("grade", "running", "云端模型正在判断教材证据是否足够...");
+      // The evidence-review contract accepts at most five documents. Retrieval
+      // may be configured with a larger parent TopK for UI exploration, but
+      // the cloud reviewer should receive the highest-ranked complete parents
+      // only (never raw child chunks).
+      const reviewDocuments = documents.slice(0, 5);
       const assessment = await assess({
         query: input.query,
         rewritten_query: rewritten,
-        documents: documents.map((doc) => ({text: doc.text, source_id: doc.metadata.source_id, normalized_score: doc.normalized_score ?? null})),
+        documents: reviewDocuments.map((doc) => ({text: doc.text, source_id: doc.metadata.source_id, normalized_score: doc.normalized_score ?? null})),
         attempt,
         ...common,
       }, input.signal);
@@ -111,7 +120,6 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
     ragExhausted = !evidenceSufficient && retrievalAttempts === MAX_ITERATIONS;
     if (ragExhausted) {
       add("grade", "failed", "三轮 RAG 均未找到理想片段，将明确标注并使用模型通用知识", "RAG_EXHAUSTED");
-      documents = [];
       retrievalId = undefined;
     }
   }
@@ -127,7 +135,11 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
 
   add("generate", "running", "正在生成回答...");
   let answer = "";
-  await streamGenerate({messages, context: documents.map((doc, index) => `[S${index + 1}] ${doc.text}`).join("\n\n"), file_ids: input.fileIds || [], sources: documents.map((doc) => ({source_id: doc.metadata.source_id, citation: `${doc.metadata.filename || "教材"} p.${doc.metadata.page || "?"}`})), retrieval_id: retrievalId, retrieval_attempts: retrievalAttempts, rag_exhausted: ragExhausted, ...common}, {
+  // Keep GenerateRequest within its declared source/context limits even when
+  // the management UI is configured to return more parent blocks.
+  const generationDocuments = ragExhausted ? [] : documents.slice(0, 16);
+  const generationContext = generationDocuments.map((doc, index) => `[S${index + 1}] ${doc.text}`).join("\n\n").slice(0, 100000);
+  await streamGenerate({messages, context: generationContext, file_ids: input.fileIds || [], sources: generationDocuments.map((doc) => ({source_id: doc.metadata.source_id, citation: `${doc.metadata.filename || "教材"} p.${doc.metadata.page || "?"}`})), retrieval_id: retrievalId, retrieval_attempts: retrievalAttempts, rag_exhausted: ragExhausted, ...common}, {
     onToken: (text) => { answer += text; input.onToken?.(text); },
     onSource: input.onSource,
     onTrace: input.onEvent,

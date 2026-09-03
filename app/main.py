@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 from fastapi import FastAPI, HTTPException, Request
@@ -10,6 +11,7 @@ from app.config import get_settings
 from app.core.telemetry import configure_logging, log_event
 from app.middleware import RequestContextMiddleware
 from app.services.lightrag_service import get_lightrag_service
+from app.services.hf_models import warmup_hf_models
 
 settings = get_settings()
 configure_logging(settings.log_level)
@@ -34,9 +36,19 @@ app.include_router(providers.router, prefix="/v1")
 app.include_router(model_settings.router, prefix="/v1")
 app.include_router(health.router)
 
+_model_warmup_task: asyncio.Task[None] | None = None
+
+
+@app.on_event("startup")
+async def warmup_models() -> None:
+    global _model_warmup_task
+    _model_warmup_task = asyncio.create_task(warmup_hf_models(), name="qwen-model-warmup")
+
 
 @app.on_event("shutdown")
 async def flush_lightrag() -> None:
+    if _model_warmup_task and not _model_warmup_task.done():
+        _model_warmup_task.cancel()
     await get_lightrag_service().finalize()
 
 

@@ -47,8 +47,9 @@ pip install -r requirements.txt
 # 可选：预下载中文本地 RAG 模型（首次实际摄入/检索也会自动下载）
 python scripts/download_models.py --cache-dir ./models
 
-# 仅启动 Qdrant + API；API 默认使用 mock provider，无需 GPU 或 API Key
-docker compose up -d qdrant api
+# 启动真实 Qwen Embedding/Reranker 链路。GPU 主机必须叠加 GPU 配置；
+# Mock 仅替代云端生成模型，不会用伪向量替代本地 RAG 模型。
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build qdrant api
 curl http://localhost:8000/health/ready
 
 # 没有教材时可跳过；有教材时执行
@@ -95,8 +96,9 @@ MODEL_CACHE_DIR=./models \
 ```
 
 Docker GPU 部署还要求安装 NVIDIA Container Toolkit。先验证容器运行时，再叠加
-GPU override 启动；基础 `docker-compose.yml` 不强制要求显卡，因此 CPU/Mock
-环境仍能正常使用。
+GPU override 启动。Embedding 或 Reranker 没有成功加载时，`/health/ready` 返回
+HTTP 503，索引和检索同样明确失败；系统不会静默写入 SHA256 伪向量或改用词法
+假重排。
 
 ```bash
 docker run --rm --gpus all nvidia/cuda:13.0.0-base-ubuntu24.04 nvidia-smi
@@ -110,8 +112,9 @@ curl http://localhost:8000/health/ready
 ```
 
 GPU override 会把宿主机的 `./models` 只作为模型缓存挂载到 `/app/models`，并设置
-`MODEL_DEVICE=cuda`、`MODEL_DTYPE=bfloat16`。ready 响应中应看到
-`runtime.cuda_available: true`、`model_device: "cuda"` 和显卡名称。若显式 CUDA
+`MODEL_DEVICE=cuda`、`MODEL_DTYPE=bfloat16`。ready 响应中应看到 `ready: true`、
+`rag_ready: true`、`models.status: "ready"`、`runtime.cuda_available: true`、
+`model_device: "cuda"` 和显卡名称。若显式 CUDA
 部署未把 GPU 暴露给容器，ready 会返回 `ready: false` 和清晰的配置错误，不会
 静默回退 CPU。停止服务时使用同一组 compose 文件：
 
@@ -187,12 +190,12 @@ host-network 模式会牺牲容器网络隔离；恢复正常内核后应回到�
 
 - `POST /v1/rewrite`：口语查询改写。
 - `POST /v1/assess`：由当前云端模型以严格 JSON 判断 Top-5 教材证据是否足够，并给出下一轮检索短语。
-- `POST /v1/retrieve`：默认召回 Top-16，使用 Qwen3-Reranker-0.6B 重排后返回最终 Top-4；管理界面可调整服务端参数。响应中的 `retrieval_id` 对应短期服务端快照，后续 `/v1/generate` 会用它重建可信上下文，不依赖浏览器回传整段教材内容。
+- `POST /v1/retrieve`：默认召回子块 Top-16，使用 Qwen3-Reranker-0.6B 重排并固定选择前 4 个子块，再返回这些子块对应的去重完整父块（实际 1–4 个，不另设父块 TopK）。响应中的 `retrieval_id` 对应短期服务端快照，后续 `/v1/generate` 会用它重建可信上下文，不依赖浏览器回传整段教材内容。
 - `POST /v1/compute`：受限 AST + 独立进程执行 Sympy，禁止 `eval/exec`。
 - `POST /v1/generate`：POST SSE，前端使用 `fetch + ReadableStream`；事件包括 `trace/source/token/error/done`。
 - `POST /v1/files`：上传回答图片或排队的 PDF/PPT 索引源；`answer_attachment` 默认 10 MB，`ingest_source` 单文件默认 10 GB。
 - `POST /v1/index`：接收浏览器选择的一个或多个 PDF/PPTX/TXT/Markdown 文件，服务端完成解析、分块、嵌入和 Qdrant upsert，并返回索引耗时、文件数、chunk 数和新增数量。
-- `GET/PUT /v1/rag/settings`：读取或更新 Chunk 字符数、召回 TopK 和 Reranker 最终 TopK。
+- `GET/PUT /v1/rag/settings`：读取或更新子块字符数和初始召回子块 TopK；Reranker 最终子块数固定为 4。
 - `GET /v1/rag/indexes`、`GET /v1/rag/indexes/{file_id}`：列出按文件隔离的索引并查看文件/Chunk 元信息。
 - `DELETE /v1/rag/indexes/{file_id}`、`DELETE /v1/rag/indexes/{file_id}/chunks/{chunk_id}`：删除整个文件索引或单个 Chunk。
 - `GET /v1/providers`：返回可用模型供应商及默认 Base URL/模型（不返回密钥）。
@@ -202,7 +205,7 @@ host-network 模式会牺牲容器网络隔离；恢复正常内核后应回到�
 
 前端顶部的“RAG 管理”链接进入独立管理页面，支持“选择文件”和“选择目录”（浏览器通过 `webkitdirectory` 提交目录内文件）。文件内容不会在浏览器端解析或向量化；前端仅以 multipart 上传，服务端按当前学科映射到白名单 Collection。索引完成后会显示 `index_id`、Collection、Embedding 模型、处理耗时、文件数、总 chunks 和新增 chunks。单次最多 100 个文件，默认单文件和单次总大小均为 10 GB，可通过 `MAX_INDEX_FILES`、`MAX_INDEX_FILE_MB`、`MAX_INDEX_TOTAL_MB` 和 `INDEX_TIMEOUT_MS` 调整。索引服务会分块流式写入临时磁盘，不会把整个大文件一次性读入内存；请确保 `/tmp` 所在磁盘有足够空间。
 
-聊天页顶部的“RAG 管理”进入独立管理界面。每个文件使用独立的 Qdrant Collection，并在服务端注册表中保存文件哈希、解析器、Embedding、Chunk 数和索引参数；删除文件只影响该文件。管理界面可以调整默认 Chunk 字符数（512）、召回 TopK（16）和 Reranker 最终 TopK（4），浏览 Chunk 文本/页码/章节/content_hash，并删除单个 Chunk。
+聊天页顶部的“RAG 管理”进入独立管理界面。LightRAG 按学科 workspace 隔离、按文件 doc_id 管理；服务端注册表保存文件哈希、解析器、Embedding、父/子块数量和索引参数，删除文件只影响该文件。索引采用父子块架构：服务端通过轻量 `markdown-it-py` AST 识别教材标题/小节、段落、公式、表格、列表和代码块，形成语义父块；父块再切成默认 512 字符子块，向量检索和 Qwen Reranker 只处理子块。系统固定选择重排前 4 个子块，再映射、去重并还原完整父块。管理界面可以调整子块字符数（512）和初始召回子块 TopK（16）；父块没有独立 TopK。聊天页会在 Agent 流程区域内即时展示这些父块并高亮命中子块，即使后续回答生成失败仍可查看资料。
 
 ## 本地 Agent
 

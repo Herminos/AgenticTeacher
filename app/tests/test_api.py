@@ -20,9 +20,10 @@ async def test_health_live() -> None:
 
 async def test_health_ready_exposes_pytorch_runtime() -> None:
     response = await request("GET", "/health/ready")
-    assert response.status_code == 200
     body = response.json()
+    assert response.status_code == (200 if body["ready"] else 503)
     assert "runtime" in body
+    assert "models" in body
     assert "cuda_available" in body["runtime"]
     assert body["model_device"] in {"cpu", "cuda"}
 
@@ -197,6 +198,22 @@ async def test_retrieve_hands_snapshot_to_generate(monkeypatch: pytest.MonkeyPat
     )
     assert generated.status_code == 200
     assert "来自检索接口的可信片段" in generated.text
+
+
+async def test_formula_query_keeps_equation_chunk(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.api import retrieve as retrieve_api
+
+    async def fake_retrieve(query: str, subject: str | None, top_k: int):
+        return ([
+            {"text": "麦克斯韦方程组的定义与历史。", "metadata": {"source_id": "definition"}, "score": 1.0, "normalized_score": 1.0},
+            {"text": "$$\\nabla\\cdot\\mathbf{E}=\\rho/\\varepsilon_0$$", "metadata": {"source_id": "equation"}, "score": 0.8, "normalized_score": 0.8},
+        ], {})
+
+    monkeypatch.setattr(retrieve_api.registry, "list_files", lambda subject: [{"status": "indexed", "filename": "maxwell.md"}])
+    monkeypatch.setattr(retrieve_api.service, "retrieve", fake_retrieve)
+    response = await request("POST", "/v1/retrieve", json={"query": "麦克斯韦方程组的公式", "subject": "physics"})
+    assert response.status_code == 200
+    assert response.json()["documents"][0]["metadata"]["source_id"] == "equation"
 
 
 async def test_rag_index_upload_returns_statistics(monkeypatch: pytest.MonkeyPatch) -> None:
