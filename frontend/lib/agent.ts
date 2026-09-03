@@ -89,8 +89,8 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
   } else {
     add("rewrite", "succeeded", rewritten, undefined, rewrittenResponse.duration_ms);
     for (let attempt = 1; attempt <= MAX_ITERATIONS; attempt += 1) {
-      add("retrieve", "running", `第 ${attempt}/3 轮：召回 Top-15 并使用 Qwen Reranker 精排...`);
-      const retrieved = await retrieve({query: rewritten, top_k: 15, ...common}, input.signal);
+      add("retrieve", "running", `第 ${attempt}/3 轮：召回配置数量并使用 Qwen Reranker 精排...`);
+      const retrieved = await retrieve({query: rewritten, ...common}, input.signal);
       retrievalAttempts = attempt;
       documents = retrieved.documents as DocumentItem[]; retrievalId = retrieved.retrieval_id;
       const retrievalDuration = retrieved.quality_hint.retrieval_ms + retrieved.quality_hint.reranker_ms;

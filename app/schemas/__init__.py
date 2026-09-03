@@ -15,6 +15,12 @@ from .api import (
     RewriteResponse,
     SourceRef,
     LLMConfig,
+    ModelSettingsResponse,
+    RagChunkResponse,
+    RagFileDetailResponse,
+    RagFileResponse,
+    RagSettingsResponse,
+    RagSettingsUpdate,
 )
 from .common import ErrorBody, ErrorResponse
 
@@ -35,6 +41,12 @@ __all__ = [
     "RewriteResponse",
     "SourceRef",
     "LLMConfig",
+    "ModelSettingsResponse",
+    "RagChunkResponse",
+    "RagFileDetailResponse",
+    "RagFileResponse",
+    "RagSettingsResponse",
+    "RagSettingsUpdate",
     "ErrorBody",
     "ErrorResponse",
 ]

@@ -1,6 +1,6 @@
 # Agentic Teacher
 
-理工科全科目 Agentic RAG 智能教学系统的可运行骨架。项目保留 `PROJECT.txt` 定义的核心架构：浏览器/Node.js 本地运行 LangGraph Agent，FastAPI 提供模型、检索、文件和受控计算能力。
+理工科全科目 Agentic RAG 智能教学系统的可运行骨架。项目保留 `PROJECT.txt` 定义的核心架构：浏览器/Node.js 本地运行 LangGraph Agent，FastAPI 提供模型、LightRAG 检索、文件和受控计算能力。自部署 RAG 统一使用官方 `lightrag-hku`，Qwen Embedding/Reranker 作为本地模型实现。
 
 ## 目录
 
@@ -59,7 +59,21 @@ npm install --prefix frontend
 npm run dev
 ```
 
+LightRAG 的索引状态、文档和向量持久化目录由 `LIGHTRAG_WORKING_DIR` 控制（默认
+`/tmp/agentic_teacher_files/lightrag`），Docker 中随 `rag_files` volume 挂载。不要在服务运行后删除该目录，
+否则重启时无法恢复已建立的文档状态。
+
 浏览器访问 <http://localhost:3000>。Compose 内 API 使用 `http://qdrant:6333`，宿主机运行 `ingest.py` 时使用 `http://localhost:6333`。
+
+如果通过局域网地址打开前端，请将 `frontend/.env.local` 中的
+`NEXT_PUBLIC_AI_API_URL` 指向 API 主机（例如 `http://192.168.1.10:8000/v1`），并在
+后端 `ALLOWED_ORIGINS` 中加入对应的前端来源；否则浏览器会将 API 请求报告为
+`Failed to fetch`。
+
+如果检索轨迹已经完成、但生成阶段提示连接中断，请先确认 API 容器使用了最新代码：
+`docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build api`。
+检索响应中的 `retrieval_id` 需要由同一个 API 实例交给 `/v1/generate`；当前版本会在
+服务端保存短期快照并自动重建上下文，旧容器未重建时会出现“检索成功但生成失败”。
 
 ## RTX 50 系列 GPU 推理
 
@@ -100,6 +114,10 @@ GPU override 会把宿主机的 `./models` 只作为模型缓存挂载到 `/app/
 `runtime.cuda_available: true`、`model_device: "cuda"` 和显卡名称。若显式 CUDA
 部署未把 GPU 暴露给容器，ready 会返回 `ready: false` 和清晰的配置错误，不会
 静默回退 CPU。停止服务时使用同一组 compose 文件：
+
+GPU override 同时声明 Compose `gpus: all` 和设备 reservation；如果仍显示
+`selected_device: "cpu"`，请确认实际启动命令包含两个 compose 文件，并重建 API
+容器（旧容器不会自动继承新的 GPU 配置）。
 
 API 镜像保留了最小 GCC 运行工具链。PyTorch/Triton 会在特定模型算子第一次执行
 时即时编译 GPU kernel；只验证 `torch.cuda.is_available()` 不足以发现这一要求，
@@ -169,21 +187,26 @@ host-network 模式会牺牲容器网络隔离；恢复正常内核后应回到�
 
 - `POST /v1/rewrite`：口语查询改写。
 - `POST /v1/assess`：由当前云端模型以严格 JSON 判断 Top-5 教材证据是否足够，并给出下一轮检索短语。
-- `POST /v1/retrieve`：固定召回 Top-15，使用 Qwen3-Reranker-0.6B 重排后只返回 Top-5；开发环境没有 Qdrant 数据时使用确定性的内存 demo 语料。
+- `POST /v1/retrieve`：默认召回 Top-16，使用 Qwen3-Reranker-0.6B 重排后返回最终 Top-4；管理界面可调整服务端参数。响应中的 `retrieval_id` 对应短期服务端快照，后续 `/v1/generate` 会用它重建可信上下文，不依赖浏览器回传整段教材内容。
 - `POST /v1/compute`：受限 AST + 独立进程执行 Sympy，禁止 `eval/exec`。
 - `POST /v1/generate`：POST SSE，前端使用 `fetch + ReadableStream`；事件包括 `trace/source/token/error/done`。
 - `POST /v1/files`：上传回答图片或排队的 PDF/PPT 索引源；`answer_attachment` 默认 10 MB，`ingest_source` 单文件默认 10 GB。
 - `POST /v1/index`：接收浏览器选择的一个或多个 PDF/PPTX/TXT/Markdown 文件，服务端完成解析、分块、嵌入和 Qdrant upsert，并返回索引耗时、文件数、chunk 数和新增数量。
+- `GET/PUT /v1/rag/settings`：读取或更新 Chunk 字符数、召回 TopK 和 Reranker 最终 TopK。
+- `GET /v1/rag/indexes`、`GET /v1/rag/indexes/{file_id}`：列出按文件隔离的索引并查看文件/Chunk 元信息。
+- `DELETE /v1/rag/indexes/{file_id}`、`DELETE /v1/rag/indexes/{file_id}/chunks/{chunk_id}`：删除整个文件索引或单个 Chunk。
 - `GET /v1/providers`：返回可用模型供应商及默认 Base URL/模型（不返回密钥）。
 - `GET /health/live`、`GET /health/ready`：进程和依赖就绪检查。
 
-前端顶部“模型设置”目前仅支持 Mock、DeepSeek、通义千问 Qwen 和 OpenAI / ChatGPT。模型名称使用按供应商联动的下拉菜单选择，Base URL、Temperature 和个人 API Key 仍可配置。默认模型依据官方文档配置为：DeepSeek `deepseek-v4-pro`（`https://api.deepseek.com`）、Qwen `qwen3.8-max`（DashScope OpenAI-compatible endpoint）和 OpenAI `gpt-5.6-sol`（`https://api.openai.com/v1`）。设置仅保存在当前页面内存中，并随本次请求传给 FastAPI；后端不会把密钥写入日志、Trace、会话或响应。生产环境应使用 HTTPS、短期鉴权，或改为在服务端 `.env` 配置统一密钥。默认 Mock provider 无需任何外部模型即可完成 Rewrite → Retrieve（内存演示语料）→ Grade → Generate 闭环。
+前端顶部“模型设置”目前仅支持 Mock、DeepSeek、通义千问 Qwen 和 OpenAI / ChatGPT。模型名称使用按供应商联动的下拉菜单选择，Base URL、Temperature 和个人 API Key 仍可配置。默认模型依据官方文档配置为：DeepSeek `deepseek-v4-pro`（`https://api.deepseek.com`）、Qwen `qwen3.8-max`（DashScope OpenAI-compatible endpoint）和 OpenAI `gpt-5.6-sol`（`https://api.openai.com/v1`）。点击“保存模型设置”后，配置会写入后端 `MODEL_SETTINGS_FILE`（默认 `/tmp/agentic_teacher_files/model_settings.json`），页面重新打开会自动加载；API Key 只返回是否已配置，实际请求由服务端补上已保存密钥。当前版本暂未加入加密和多用户隔离，生产环境仍应使用 HTTPS、鉴权和受保护的数据卷。默认 Mock provider 无需任何外部模型即可完成 Rewrite → Retrieve → Grade → Generate 闭环。
 
-前端顶部的“RAG Index”面板支持“选择文件”和“选择目录”（浏览器通过 `webkitdirectory` 提交目录内文件）。文件内容不会在浏览器端解析或向量化；前端仅以 multipart 上传，服务端按当前学科映射到白名单 Collection。索引完成后会显示 `index_id`、Collection、Embedding 模型、处理耗时、文件数、总 chunks 和新增 chunks。单次最多 100 个文件，默认单文件和单次总大小均为 10 GB，可通过 `MAX_INDEX_FILES`、`MAX_INDEX_FILE_MB`、`MAX_INDEX_TOTAL_MB` 和 `INDEX_TIMEOUT_MS` 调整。索引服务会分块流式写入临时磁盘，不会把整个大文件一次性读入内存；请确保 `/tmp` 所在磁盘有足够空间。
+前端顶部的“RAG 管理”链接进入独立管理页面，支持“选择文件”和“选择目录”（浏览器通过 `webkitdirectory` 提交目录内文件）。文件内容不会在浏览器端解析或向量化；前端仅以 multipart 上传，服务端按当前学科映射到白名单 Collection。索引完成后会显示 `index_id`、Collection、Embedding 模型、处理耗时、文件数、总 chunks 和新增 chunks。单次最多 100 个文件，默认单文件和单次总大小均为 10 GB，可通过 `MAX_INDEX_FILES`、`MAX_INDEX_FILE_MB`、`MAX_INDEX_TOTAL_MB` 和 `INDEX_TIMEOUT_MS` 调整。索引服务会分块流式写入临时磁盘，不会把整个大文件一次性读入内存；请确保 `/tmp` 所在磁盘有足够空间。
+
+聊天页顶部的“RAG 管理”进入独立管理界面。每个文件使用独立的 Qdrant Collection，并在服务端注册表中保存文件哈希、解析器、Embedding、Chunk 数和索引参数；删除文件只影响该文件。管理界面可以调整默认 Chunk 字符数（512）、召回 TopK（16）和 Reranker 最终 TopK（4），浏览 Chunk 文本/页码/章节/content_hash，并删除单个 Chunk。
 
 ## 本地 Agent
 
-`frontend/lib/agent.ts` 定义路由、云端 JSON Rewrite → Top-15 Retrieve → Qwen Top-5 Rerank → 云端 Evidence Assess（最多 3 次）、Hybrid Compute Tool 和 Generate 流程，同时导出编译后的 LangGraph 图。寒暄、身份询问等由 Rewrite 返回空 JSON，Agent 会跳过 RAG。客户端的 `max_iterations` 只是默认值，服务端按 `agent_run_id` 再次强制三轮上限。
+`frontend/lib/agent.ts` 定义路由、云端 JSON Rewrite → 配置 TopK Retrieve → Qwen Reranker → 云端 Evidence Assess（最多 3 次）、Hybrid Compute Tool 和 Generate 流程，同时导出编译后的 LangGraph 图。寒暄、身份询问等由 Rewrite 返回空 JSON，Agent 会跳过 RAG。客户端的 `max_iterations` 只是默认值，服务端按 `agent_run_id` 再次强制三轮上限。
 
 三轮检索仍被云端模型判定为证据不足时，后端会记录 `rag_exhausted_world_knowledge_fallback` warning，并在回答正文前强制加入“未在已索引教材中找到足够相关片段，以下基于模型通用知识回答”，不会伪造教材来源。
 

@@ -2,9 +2,10 @@
         理工科全科目 Agentic RAG 智能教学系统 - 完整技术规格说明书
 ================================================================================
 
-文档版本：1.1（工程修订版）
+文档版本：1.2（LightRAG 迁移版）
 本版修订原则：保留“本地 LangGraph Agent + FastAPI 模型/RAG 服务”的核心架构，
-仅收紧接口、数据、安全、部署和测试等工程边界；本地 Agent 仍可独立开源和替换。
+将自研 RAG 索引/检索实现全面替换为官方 LightRAG（lightrag-hku）并以 Qdrant 作为
+向量后端；仅收紧接口、数据、安全、部署和测试等工程边界；本地 Agent 仍可独立开源和替换。
 项目目标：为理工科本科生（微积分、线性代数、大学物理、化学、编程算法等）
           提供基于 Agentic RAG 的智能答疑服务。
 
@@ -62,25 +63,32 @@
   后端接口。客户端状态可被用户修改，不能作为权限、配额或计费依据。
 
 【高算力服务层】（服务端）
-  技术栈：Python 3.10–3.13 + FastAPI + HuggingFace Transformers（推荐 Python 3.11；
+  技术栈：Python 3.10–3.13 + FastAPI + LightRAG + HuggingFace Transformers（推荐 Python 3.11；
           Python 3.14 暂不支持，避免旧版 PyO3/pydantic-core 触发本地编译失败）
   核心职责：
   1. 管理并按需加载重型模型（Embedding、Reranker、改写模型、LLM），支持 provider
      适配、缓存和懒加载，启动失败时提供明确的 ready 状态。
-  2. 执行 Qdrant 向量检索、稀疏/BM25 关键词检索、融合和重排序。
+  2. 通过 LightRAG 执行文档解析后的语义分块、知识图谱构建、向量/关键词混合检索、
+     融合和查询阶段重排序；禁止在业务代码中重复实现另一套 RAG 索引算法。
   3. 提供 SSE 流式生成接口、文件接口和受控符号计算接口。
   4. 对每个请求执行鉴权（如启用）、参数校验、超时、限流、配额和用量计量。
   5. 暴露原子化的 API 供本地 Agent 调用；不依赖客户端传入的 iteration 或费用数据。
 
-【向量存储层】（数据库）
-  技术栈：Qdrant (Docker 容器化部署)
+【RAG 编排与存储层】
+  技术栈：LightRAG（官方 lightrag-hku 包）+ Qdrant（Docker 容器化向量后端）+
+          LightRAG 持久化 KV/图谱存储
   核心职责：
-  1. 存储教材文本块、假设性问题向量及元数据（页码、文件名、章节）。
-  2. 支持多 Collection 隔离（如 math_collection, physics_collection），或在同一
-     Collection 中使用 named dense/sparse vectors；subject 到 Collection 的映射
-     必须使用服务端白名单。
-  3. Payload 至少包含 source_id、chunk_id、filename、page、chapter、content_hash
-     和可选的版面坐标，便于增量索引、去重和引用回溯。
+  1. LightRAG 是唯一的 RAG 索引、分块、知识图谱、混合检索、上下文组装和文档删除
+     编排层；应用层只负责鉴权、参数边界、文件暂存和响应适配。
+  2. Qdrant 由 LightRAG 的 QdrantVectorDBStorage 管理，禁止业务代码直接创建或
+     操作另一套同名向量 Collection。每个 subject 使用服务端白名单 workspace，
+     每个文件使用稳定 doc_id 实现隔离、幂等和删除。
+  3. LightRAG 文档 metadata 必须保留 source_id、doc_id、chunk_id、filename、page、
+     chapter、content_hash、parser_version、embedding_model，支持引用回溯和增量更新。
+  4. Embedding 使用服务端 Qwen3-Embedding-0.6B；查询重排序使用 Qwen3-Reranker-0.6B，
+     两者通过 LightRAG 的 embedding_func/rerank_model_func 注入，浏览器不加载模型。
+  5. LightRAG 的 JSON/KV、图谱和 Qdrant 数据必须挂载持久化 volume；应用重启后能够
+     恢复文档状态、索引元数据和失败任务，不得以进程内字典作为生产数据源。
 
 ================================================================================
 三、完整技术栈明细表
@@ -88,9 +96,11 @@
 
 【后端 (算力服务)】
   - Web 框架：FastAPI + Uvicorn
-  - 嵌入模型：Qwen3-Embedding-0.6B（维度从模型配置读取，并与 Collection 校验）
+  - RAG 框架：LightRAG（lightrag-hku，统一负责 Chunk、KG、混合召回和上下文）
+  - 向量后端：LightRAG QdrantVectorDBStorage（Qdrant Docker 服务）
+  - 嵌入模型：Qwen3-Embedding-0.6B（通过 LightRAG embedding_func 注入）
   - 重排序模型：Qwen3-Reranker-0.6B
-  - 查询改写模型：Qwen2.5-0.5B-Instruct（可替换，用于口语转书面语）
+  - 查询改写模型：由 DeepSeek/Qwen/OpenAI 云端 provider 执行；服务端不再加载本地改写小模型
   - 生成模型（可插拔）：支持本地 vLLM 或 OpenAI API，需支持多模态输入；通过
     provider adapter 屏蔽不同供应商的请求格式。
   - 向量数据库驱动：qdrant-client（dense/sparse named vectors，融合策略可配置）
@@ -201,7 +211,7 @@
   4. Grade Node (充分性判断节点)：
      - 重要约束：此节点完全不调用大模型，仅基于分数规则判断。
      - 判断逻辑：使用服务端归一化后的分数，并综合最低合格分、文档去重、
-       主题/知识点覆盖度和结果数量；阈值按 Collection 配置并通过离线评测校准。
+       主题/知识点覆盖度和结果数量；阈值按 subject/workspace 配置并通过离线评测校准。
      - 若结果不足且 iteration < max_iterations：
         路由回 Rewrite Node（进行下一次检索尝试）。
      - 若结果充分、达到最大尝试次数或检索服务明确无更多结果：
@@ -227,8 +237,9 @@
 ================================================================================
 
 Base URL（开发环境）：http://localhost:8000/v1
-实际路径为 `/v1/rewrite`、`/v1/retrieve`、`/v1/compute`、`/v1/generate` 和
-`/v1/files`；健康检查使用不计入业务版本的 `/health/live` 与 `/health/ready`。
+实际路径为 `/v1/rewrite`、`/v1/retrieve`、`/v1/compute`、`/v1/generate`、
+`/v1/files` 和 `/v1/model-settings`；健康检查使用不计入业务版本的
+`/health/live` 与 `/health/ready`。
 除 SSE 和 multipart 文件上传外，所有请求和响应使用 UTF-8 JSON；SSE 的每个
 `data` 字段仍为 JSON。
 业务 API 路由统一挂载 `/v1`，health 路由显式例外挂在根路径；前端 API client
@@ -252,6 +263,17 @@ Base URL（开发环境）：http://localhost:8000/v1
      request_id 去重，不能因为网络重试重复计费或重复写入会话。
   7. 常见 HTTP 状态码至少包括 400/401/403/408/413/422/429/500/503，并与统一
      error.code 对应；触发限流时返回 Retry-After。
+
+-------------------------------------------------------------------------------
+模型设置接口: GET/PUT/DELETE /model-settings
+-------------------------------------------------------------------------------
+  功能：管理当前自部署实例使用的单用户模型供应商配置。配置包括 provider、
+  Base URL、下拉选择的模型和 temperature；PUT 可提交个人 API Key，服务端将其
+  持久化到 `MODEL_SETTINGS_FILE` 指定的 JSON 文件。GET 和 PUT 响应只返回
+  `api_key_configured` 布尔值，不返回明文密钥；当 PUT 的 API Key 为空且 provider
+  未变化时保留已保存密钥，切换 provider 时不得携带旧 provider 的密钥。DELETE
+  恢复 Mock 默认配置并清除已保存密钥。该版本暂按单用户自部署场景实现，不包含
+  多租户权限或加密密钥管理；部署时应保护配置文件所在持久化卷。
 
 -------------------------------------------------------------------------------
 接口 1: POST /rewrite
@@ -390,7 +412,8 @@ Base URL（开发环境）：http://localhost:8000/v1
 -------------------------------------------------------------------------------
 健康检查接口: GET /health/live 与 GET /health/ready
 -------------------------------------------------------------------------------
-  live 只检查进程；ready 检查 Qdrant、模型/provider 和 Collection 维度是否匹配。
+  live 只检查进程；ready 检查 LightRAG 存储、Qdrant、模型/provider、workspace 和
+  embedding 维度是否匹配。
 
 ================================================================================
 六、前端 UI 交互规范
@@ -454,14 +477,18 @@ Base URL（开发环境）：http://localhost:8000/v1
      去重、长度限制和质量过滤；资源受限或低价值内容可以跳过。
      例如：文本讲“牛顿-莱布尼茨公式”，生成的假设性问题可能是
       “如何计算定积分？”、“牛顿-莱布尼茨公式的使用条件是什么？”。
-  4. 存储：
-     - 将原始文本块和实际生成的假设性问题分别向量化。
-     - 存入 Qdrant 的 named vectors（如 text_dense、question_dense 和可选的
-       bm25_sparse），但归属于同一个 Collection（例如 lecture_math）；融合方式
-       （RRF 或归一化加权）和 Reranker 版本必须记录在索引配置中。
-     - 默认每个 Chunk 产生一个 text_dense 点；HyDE 问题可作为共享 chunk_id 的
-       独立 variant 点，或先聚合成一个 question_dense 向量，二者由配置择一，不能
-       把多个向量无声明地写入同一个普通向量字段。
+  4. 存储与检索：
+     - 将解析后的文档交给 LightRAG 的官方 pipeline；由 LightRAG 完成语义分块、
+       文档状态记录、实体/关系抽取、向量写入和索引刷新。业务层不得再调用自研的
+       `_chunks`、手写向量 upsert 或自定义融合流程作为生产路径。
+     - LightRAG 使用 QdrantVectorDBStorage 保存 chunk/entity/relation 向量，使用
+       workspace + doc_id 做 subject/文件隔离；JSON/KV 与 NetworkX（或配置的图存储）
+       保存文档、状态、图谱和缓存。
+     - 查询统一调用 LightRAG `aquery_data`/`aquery`，默认使用 hybrid/naive 模式及
+       `QueryParam` 的 chunk_top_k；Qwen Reranker 通过 `rerank_model_func` 注入，最终
+       TopK 由服务端配置控制。返回结果必须映射回原始 metadata，不能伪造来源。
+     - 若启用 HyDE，只能通过 LightRAG 支持的 query/insert 扩展点实现，并记录版本、
+       参数和耗时；不得在 Qdrant 外另建未声明的 question_dense 点。
   5. 可重复与可恢复：以 tenant/collection、source_id、content_hash、chunk_index、
      parser_version 和 embedding_model 组合成幂等键，支持增量更新、断点续跑和失败
      清单；重新索引时不能产生重复 Chunk，也不能跨课程/租户覆盖同名文件。
@@ -471,9 +498,15 @@ Base URL（开发环境）：http://localhost:8000/v1
 ================================================================================
 
 【后端 .env 文件】
-  QDRANT_URL=http://localhost:6333       # 宿主机运行 API/ingest 时
+  QDRANT_URL=http://localhost:6333       # LightRAG QdrantVectorDBStorage 使用
   # Docker Compose 中 API 容器应覆盖为：http://qdrant:6333
-  QDRANT_COLLECTION=lecture_math         # 默认值，实际 subject 映射见下方配置
+  LIGHTRAG_WORKING_DIR=./rag_storage     # LightRAG KV/图谱/状态持久化目录
+  LIGHTRAG_VECTOR_STORAGE=QdrantVectorDBStorage
+  LIGHTRAG_GRAPH_STORAGE=NetworkXStorage
+  LIGHTRAG_KV_STORAGE=JsonKVStorage
+  LIGHTRAG_DOC_STATUS_STORAGE=JsonDocStatusStorage
+  LIGHTRAG_WORKSPACE=agentic_teacher     # subject/file 隔离的服务端 workspace 前缀
+  QDRANT_COLLECTION=lecture_math         # 仅保留兼容旧数据的默认映射
   COLLECTION_MAP_FILE=./config/collections.yaml
   GRADE_THRESHOLDS_FILE=./config/grade_thresholds.yaml
   MODEL_CACHE_DIR=./models
@@ -484,6 +517,7 @@ Base URL（开发环境）：http://localhost:8000/v1
   RERANKER_MODEL=Qwen3-Reranker-0.6B
   MODEL_DEVICE=auto          # auto/cpu/cuda；dtype/量化由模型配置决定
   OPENAI_API_KEY=            # 若使用 OpenAI；仅存在服务端环境
+  MODEL_SETTINGS_FILE=/tmp/agentic_teacher_files/model_settings.json
   ALLOWED_ORIGINS=http://localhost:3000
   MAX_AGENT_ITERATIONS=3     # 服务端硬上限；不得被客户端提高
   MAX_TOP_K=8
@@ -493,11 +527,11 @@ Base URL（开发环境）：http://localhost:8000/v1
   COMPUTE_TIMEOUT_MS=3000
   MAX_CONTEXT_TOKENS=12000
   MAX_UPLOAD_MB=10
-  GRADE_THRESHOLD_DEFAULT=0.70  # Collection 未配置时的校准 normalized_score
+  GRADE_THRESHOLD_DEFAULT=0.70  # workspace 未配置时的校准 normalized_score
   API_AUTH_MODE=none         # 生产环境应启用短期 Bearer 或等价机制
 
   collections.yaml 示例：calculus: lecture_math、physics: lecture_physics。
-  grade_thresholds.yaml 可为每个 Collection 覆盖默认阈值；subject、Collection 和
+  grade_thresholds.yaml 可为每个 subject/workspace 覆盖默认阈值；subject、workspace 和
   阈值文件均由服务端加载并校验，客户端只能提交 subject 名称。
 
 【前端 .env.local 文件】
@@ -516,15 +550,17 @@ Base URL（开发环境）：http://localhost:8000/v1
   1. 创建 app/ 目录，内部包含：
      - api/          (存放路由定义，如 rewrite.py, retrieve.py, files.py, health.py)
      - core/         (存放模型加载类，如 EmbeddingLoader, RerankerLoader)
-     - services/     (存放业务逻辑，如 QdrantService, ComputeService)
+     - services/     (存放业务逻辑，如 LightRAGService, ComputeService)
      - schemas/      (Pydantic 请求/响应模型与统一错误结构)
      - middleware/   (request_id、鉴权、限流和异常处理)
      - tests/        (单元、接口和 SSE 契约测试)
-  2. 提供 compose 配置启动 Qdrant 和 FastAPI 服务：Qdrant 使用持久化 volume，
-     API 带 healthcheck；重型本地模型可通过 profile/GPU 配置或懒加载启用，不能
+  2. 提供 compose 配置启动 Qdrant、LightRAG 和 FastAPI 服务：Qdrant 与 LightRAG
+     working directory 使用持久化 volume，API 带 healthcheck；重型本地模型可通过
+     profile/GPU 配置或懒加载启用，不能
      假设所有开发机启动时都有 GPU 或已下载模型。
   3. 提供 ingest.py 脚本，用于解析本地 PPT/PDF 文件并灌入向量库。
-  4. 提供 requirements.txt。
+  4. 提供 requirements.txt，固定经过验证的 `lightrag-hku` 版本及其 API/storage
+     依赖，避免安装未锁定的破坏性主版本。
   5. 提供 `.env.example`、索引配置示例和无外部模型依赖的 mock provider，便于
      在没有 GPU、API Key 或教材的环境下启动并测试接口。
 
@@ -555,11 +591,13 @@ Base URL（开发环境）：http://localhost:8000/v1
   1. 在终端执行：docker compose up -d qdrant api
      （Compose 必须为 api 服务注入 QDRANT_URL=http://qdrant:6333；等待
       `/health/ready` 返回 200；本地模型按配置懒加载或使用 mock provider）
-  2. 执行：python ingest.py --dir ./data/微积分 --collection lecture_math
-     （将测试教材切片入库）
+  2. 执行：python ingest.py --dir ./data/微积分 --workspace calculus
+     （通过 LightRAG pipeline 完成解析结果导入、分块、Embedding、图谱和向量刷新）
   3. 在另一个终端执行：npm run dev
      （启动前端开发服务器，访问 http://localhost:3000）
-  4. 使用 pytest、前端测试和 curl 运行最小契约测试，再进行前后端联调。
+  4. 使用 pytest、前端测试和 curl 运行最小契约测试，再进行前后端联调；至少验证
+     LightRAG 文档状态为 PROCESSED、Qdrant 中存在 chunk 向量，并能以同一 doc_id
+     检索和删除。
 
 ================================================================================
 十、最后叮嘱
@@ -579,7 +617,8 @@ Base URL（开发环境）：http://localhost:8000/v1
      阈值；无依据时不会伪造来源。
   3. 生成答案能够引用 source_id，且 SSE 事件顺序、request_id、usage 和错误
      格式符合契约。
-  4. 重复摄入同一文件不会产生重复 Chunk；Qdrant/模型未就绪时有明确降级提示。
+  4. 重复摄入同一文件不会产生重复文档或 Chunk；LightRAG/Qdrant/模型未就绪时有
+     明确降级提示，生产模式不得静默切换到内存词法检索。
   5. 服务端实际用量可按 agent_run_id 追踪，客户端修改状态不会突破配额或安全限制。
 
 开始生成完整的项目代码吧。

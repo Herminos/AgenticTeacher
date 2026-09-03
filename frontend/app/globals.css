@@ -16,5 +16,9 @@
 * { box-sizing: border-box; }
 body { margin: 0; background: hsl(var(--background)); color: hsl(var(--foreground)); }
 button, textarea, select { font: inherit; }
-.prose code { color: #67e8f9; }
-.prose pre { overflow-x: auto; border: 1px solid hsl(var(--border)); border-radius: .75rem; background: #020617; padding: 1rem; }
+.markdown-body { min-width: 0; overflow-wrap: anywhere; font-size: 15px; line-height: 1.75; }
+.markdown-body.markdown-compact { font-size: 13px; line-height: 1.6; }
+.markdown-body .katex-display { max-width: 100%; overflow-x: auto; overflow-y: hidden; padding: .5rem 0; }
+.markdown-body .katex { font-size: 1.05em; }
+.markdown-body input[type="checkbox"] { margin-right: .45rem; accent-color: hsl(var(--primary)); }
+.markdown-body pre { overflow-x: auto; }

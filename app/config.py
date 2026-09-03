@@ -35,9 +35,9 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     allowed_origins: str = "http://localhost:3000"
     max_agent_iterations: int = 3
-    max_top_k: int = 15
-    retrieval_candidate_k: int = 15
-    reranker_top_k: int = 5
+    max_top_k: int = 32
+    retrieval_candidate_k: int = 16
+    reranker_top_k: int = 4
     request_connect_timeout_ms: int = 5000
     request_read_timeout_ms: int = 30000
     generate_total_timeout_ms: int = 120000
@@ -57,6 +57,10 @@ class Settings(BaseSettings):
     max_index_file_mb: int = 10240
     max_index_total_mb: int = 10240
     index_timeout_ms: int = 600000
+    rag_chunk_chars: int = 512
+    rag_registry_file: str = "/tmp/agentic_teacher_files/rag_registry.json"
+    lightrag_working_dir: str = "/tmp/agentic_teacher_files/lightrag"
+    model_settings_file: str = "/tmp/agentic_teacher_files/model_settings.json"
 
     model_config = SettingsConfigDict(
         env_file=".env",

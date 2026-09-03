@@ -10,7 +10,7 @@ from app.services.hf_models import embed_texts
 
 try:
     from qdrant_client import QdrantClient
-    from qdrant_client.models import Distance, PointStruct, VectorParams
+    from qdrant_client.models import Distance, PointIdsList, PointStruct, VectorParams
 except ImportError:  # pragma: no cover
     QdrantClient = None  # type: ignore
 
@@ -82,7 +82,9 @@ class QdrantService:
         return self._qdrant_available
 
     def _memory_search(self, collection: str, query: str, top_k: int, filters: dict) -> list[Retrieved]:
-        rows = self._memory.get(collection, self._memory.get(self.default_collection, []))
+        rows = self._memory.get(collection, [])
+        if collection == self.default_collection and not rows:
+            rows = self._memory.get(self.default_collection, [])
         query_terms = {term.lower() for term in re.findall(r"[\w\u4e00-\u9fff]+", query) if len(term) > 1}
         scored: list[Retrieved] = []
         for row in rows:
@@ -127,6 +129,75 @@ class QdrantService:
         selected = all_results[:top_k]
         self._snapshots[retrieval_id] = selected
         return selected, retrieval_id, len(all_results) > top_k
+
+    async def search_collections(
+        self,
+        collections: list[str],
+        query: str,
+        top_k: int,
+        filters: dict,
+    ) -> tuple[list[Retrieved], str, bool]:
+        """Search isolated file collections and merge results by chunk id."""
+        if not collections:
+            return await self.search(self.default_collection, query, top_k, filters)
+        merged: dict[str, Retrieved] = {}
+        has_more = False
+        for collection in collections:
+            rows, _, collection_has_more = await self.search(collection, query, top_k, filters)
+            has_more = has_more or collection_has_more
+            for row in rows:
+                key = str(row.metadata.get("chunk_id", ""))
+                if key not in merged or row.normalized_score > merged[key].normalized_score:
+                    merged[key] = row
+        selected = sorted(merged.values(), key=lambda item: item.normalized_score, reverse=True)[:top_k]
+        retrieval_id = f"retr_{uuid4().hex[:12]}"
+        self._snapshots[retrieval_id] = selected
+        return selected, retrieval_id, has_more or len(merged) > len(selected)
+
+    async def collection_chunks(self, collection: str, offset: int = 0, limit: int = 100) -> list[dict]:
+        """Return sanitized chunk payloads for the management UI."""
+        offset = max(0, int(offset))
+        limit = max(1, min(500, int(limit)))
+        if self.client is not None and await self._ping():
+            try:
+                points, _ = self.client.scroll(
+                    collection_name=collection,
+                    limit=min(500, offset + limit),
+                    offset=None,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                rows = [{**(point.payload or {}), "id": str(point.id)} for point in points]
+                return rows[offset : offset + limit]
+            except Exception:
+                pass
+        rows = self._memory.get(collection, [])
+        return [{**row.get("metadata", {}), "text": row.get("text", "")} for row in rows[offset : offset + limit]]
+
+    async def delete_chunks(self, collection: str, chunk_ids: list[str]) -> int:
+        ids = {str(item) for item in chunk_ids if item}
+        if not ids:
+            return 0
+        deleted = 0
+        if self.client is not None and await self._ping():
+            try:
+                point_ids = [int(hashlib.sha256(chunk_id.encode()).hexdigest()[:15], 16) for chunk_id in ids]
+                self.client.delete(collection_name=collection, points_selector=PointIdsList(points=point_ids), wait=True)
+                deleted = len(ids)
+            except Exception:
+                pass
+        bucket = self._memory.get(collection, [])
+        before = len(bucket)
+        self._memory[collection] = [row for row in bucket if str(row.get("metadata", {}).get("chunk_id", "")) not in ids]
+        return max(deleted, before - len(self._memory[collection]))
+
+    async def delete_collection(self, collection: str) -> None:
+        if self.client is not None and await self._ping():
+            try:
+                self.client.delete_collection(collection_name=collection)
+            except Exception:
+                pass
+        self._memory.pop(collection, None)
 
     def snapshot(self, retrieval_id: str) -> list[Retrieved] | None:
         return self._snapshots.get(retrieval_id)

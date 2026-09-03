@@ -301,15 +301,12 @@ def provider_catalog() -> list[dict[str, Any]]:
 
 
 def get_provider(config: LLMConfig | None = None) -> BaseProvider:
-    settings = get_settings()
+    from app.services.model_settings import get_model_settings_store
+
     if config is None:
-        provider = settings.llm_provider if settings.llm_provider in DEFAULTS else "mock"
-        config = LLMConfig(
-            provider=provider,
-            base_url=settings.llm_base_url,
-            api_key=settings.openai_api_key,
-            model=settings.llm_model,
-        )
+        config = get_model_settings_store().as_llm_config()
+    else:
+        config = get_model_settings_store().as_llm_config(config)
     if config.provider == "mock":
         return MockProvider()
     return OpenAICompatibleProvider(config)

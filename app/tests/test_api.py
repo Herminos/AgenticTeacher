@@ -27,6 +27,52 @@ async def test_health_ready_exposes_pytorch_runtime() -> None:
     assert body["model_device"] in {"cpu", "cuda"}
 
 
+async def test_model_settings_persist_without_returning_secret(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.api import model_settings
+
+    monkeypatch.setattr(model_settings.store, "path", tmp_path / "model-settings.json")
+    saved = await request(
+        "PUT",
+        "/v1/model-settings",
+        json={"provider": "openai", "base_url": "https://api.example.test/v1", "model": "gpt-test", "api_key": "sk-test-secret", "temperature": 0.4},
+    )
+    assert saved.status_code == 200
+    assert saved.json()["api_key_configured"] is True
+    assert "api_key" not in saved.json()
+    loaded = await request("GET", "/v1/model-settings")
+    assert loaded.status_code == 200
+    assert loaded.json()["model"] == "gpt-test"
+    assert loaded.json()["api_key_configured"] is True
+    await request("PUT", "/v1/model-settings", json={"provider": "openai", "model": "gpt-next", "temperature": 0.2})
+    assert model_settings.store.get()["api_key"] == "sk-test-secret"
+
+    # Switching provider with an empty key must not leak the old provider's key.
+    switched = await request(
+        "PUT",
+        "/v1/model-settings",
+        json={"provider": "qwen", "model": "qwen-test", "temperature": 0.2},
+    )
+    assert switched.status_code == 200
+    assert switched.json()["api_key_configured"] is False
+    assert model_settings.store.get()["api_key"] is None
+
+
+async def test_provider_uses_persisted_key(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.api import model_settings
+    from app.schemas import LLMConfig
+    from app.services.model_provider import OpenAICompatibleProvider, get_provider
+
+    monkeypatch.setattr(model_settings.store, "path", tmp_path / "model-settings.json")
+    await request(
+        "PUT",
+        "/v1/model-settings",
+        json={"provider": "openai", "model": "gpt-test", "api_key": "sk-persisted"},
+    )
+    provider = get_provider(LLMConfig(provider="openai", model="gpt-test"))
+    assert isinstance(provider, OpenAICompatibleProvider)
+    assert provider.api_key == "sk-persisted"
+
+
 async def test_rewrite_contract() -> None:
     response = await request(
         "POST",
@@ -114,6 +160,43 @@ async def test_generate_sse_contract() -> None:
     assert response.status_code == 200
     assert "event: token" in response.text
     assert "event: done" in response.text
+
+
+async def test_generate_accepts_retrieval_snapshot_id() -> None:
+    from app.api.retrieve import service as retrieval_service
+
+    retrieval_service.save_snapshot("test_retrieval", [{"text": "受信的教材片段"}])
+    response = await request(
+        "POST",
+        "/v1/generate",
+        json={
+            "messages": [{"role": "user", "content": "解释这个概念"}],
+            "retrieval_id": "test_retrieval",
+            "llm": {"provider": "mock"},
+        },
+    )
+    assert response.status_code == 200
+    assert "受信的教材片段" in response.text
+
+
+async def test_retrieve_hands_snapshot_to_generate(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.api import retrieve as retrieve_api
+
+    async def fake_retrieve(query: str, subject: str | None, top_k: int):
+        return ([{"text": "来自检索接口的可信片段", "metadata": {"source_id": "src"}, "score": 1.0, "normalized_score": 1.0}], {})
+
+    monkeypatch.setattr(retrieve_api.registry, "list_files", lambda subject: [{"status": "indexed", "filename": "notes.md"}])
+    monkeypatch.setattr(retrieve_api.service, "retrieve", fake_retrieve)
+    retrieved = await request("POST", "/v1/retrieve", json={"query": "概念", "subject": "calculus"})
+    assert retrieved.status_code == 200
+    retrieval_id = retrieved.json()["retrieval_id"]
+    generated = await request(
+        "POST",
+        "/v1/generate",
+        json={"messages": [{"role": "user", "content": "解释概念"}], "retrieval_id": retrieval_id, "llm": {"provider": "mock"}},
+    )
+    assert generated.status_code == 200
+    assert "来自检索接口的可信片段" in generated.text
 
 
 async def test_rag_index_upload_returns_statistics(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -5,6 +5,7 @@ pydantic==2.10.5
 pydantic-settings==2.7.1
 python-multipart==0.0.20
 qdrant-client==1.13.2
+lightrag-hku==1.5.7
 sympy==1.13.3
 httpx==0.28.1
 # Local Chinese RAG models (lazy-loaded; PyTorch 2.7+ supports RTX 50-series/Blackwell)

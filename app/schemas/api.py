@@ -11,9 +11,10 @@ ProviderName = Literal["mock", "deepseek", "qwen", "openai"]
 class LLMConfig(BaseModel):
     """Per-request model settings supplied by the UI.
 
-    The API key is intentionally never returned, persisted, or included in
-    trace events. Deployments should use HTTPS and may disable this field when
-    centrally managed credentials are preferred.
+    The API key is accepted for the active request and is never returned by
+    the model-settings read API or included in trace events. Self-hosted
+    deployments may persist it in the configured settings file; use HTTPS and
+    a protected volume when this is enabled.
     """
 
     provider: ProviderName = "mock"
@@ -38,6 +39,14 @@ class LLMConfig(BaseModel):
             return None
         value = value.strip()
         return value or None
+
+
+class ModelSettingsResponse(BaseModel):
+    provider: ProviderName = "mock"
+    base_url: str | None = None
+    model: str | None = None
+    temperature: float = Field(default=0.2, ge=0.0, le=2.0)
+    api_key_configured: bool = False
 
 
 class RewriteRequest(RequestMeta):
@@ -96,7 +105,7 @@ class AssessResponse(BaseModel):
 
 class RetrieveRequest(RequestMeta):
     query: str = Field(min_length=1, max_length=4000)
-    top_k: int = Field(default=3, ge=1, le=32)
+    top_k: int | None = Field(default=None, ge=1, le=32)
     subject: str | None = Field(default=None, max_length=64)
     filters: dict[str, Any] = Field(default_factory=dict)
 
@@ -181,6 +190,8 @@ class IndexedFileResult(BaseModel):
     chunks: int = 0
     status: Literal["indexed", "skipped", "failed"]
     error: str | None = None
+    file_id: str | None = None
+    collection: str | None = None
 
 
 class IndexResponse(BaseModel):
@@ -197,3 +208,56 @@ class IndexResponse(BaseModel):
     embedding_model: str
     files: list[IndexedFileResult] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    chunk_chars: int = 512
+    retrieval_top_k: int = 16
+    reranker_top_k: int = 4
+    collections: list[str] = Field(default_factory=list)
+
+
+class RagSettingsUpdate(BaseModel):
+    chunk_chars: int | None = Field(default=None, ge=128, le=8192)
+    retrieval_top_k: int | None = Field(default=None, ge=1, le=64)
+    reranker_top_k: int | None = Field(default=None, ge=1, le=32)
+
+
+class RagSettingsResponse(BaseModel):
+    chunk_chars: int
+    retrieval_top_k: int
+    reranker_top_k: int
+
+
+class RagFileResponse(BaseModel):
+    file_id: str
+    source_id: str
+    filename: str
+    subject: str | None = None
+    collection: str
+    size_bytes: int = 0
+    content_hash: str = ""
+    chunks: int = 0
+    chunk_chars: int = 512
+    retrieval_top_k: int = 16
+    reranker_top_k: int = 4
+    embedding_model: str = ""
+    parser_version: str = ""
+    status: str = "indexed"
+    updated_at: str | None = None
+
+
+class RagChunkResponse(BaseModel):
+    id: str | None = None
+    chunk_id: str
+    source_id: str = ""
+    filename: str = ""
+    page: int | None = None
+    chapter: str | None = None
+    chunk_index: int | None = None
+    content_hash: str = ""
+    parser_version: str = ""
+    text: str = ""
+
+
+class RagFileDetailResponse(RagFileResponse):
+    chunk_items: list[RagChunkResponse] = Field(default_factory=list)
+    chunk_offset: int = 0
+    chunk_limit: int = 100

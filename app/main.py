@@ -5,14 +5,15 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api import compute, files, generate, health, index, providers, retrieve, rewrite
+from app.api import compute, files, generate, health, index, model_settings, providers, rag, retrieve, rewrite
 from app.config import get_settings
 from app.core.telemetry import configure_logging, log_event
 from app.middleware import RequestContextMiddleware
+from app.services.lightrag_service import get_lightrag_service
 
 settings = get_settings()
 configure_logging(settings.log_level)
-app = FastAPI(title="Agentic Teacher API", version="1.1.0")
+app = FastAPI(title="Agentic Teacher API", version="1.2.0")
 app.add_middleware(RequestContextMiddleware)
 app.add_middleware(
     CORSMiddleware,
@@ -28,8 +29,15 @@ app.include_router(compute.router, prefix="/v1")
 app.include_router(generate.router, prefix="/v1")
 app.include_router(files.router, prefix="/v1")
 app.include_router(index.router, prefix="/v1")
+app.include_router(rag.router, prefix="/v1")
 app.include_router(providers.router, prefix="/v1")
+app.include_router(model_settings.router, prefix="/v1")
 app.include_router(health.router)
+
+
+@app.on_event("shutdown")
+async def flush_lightrag() -> None:
+    await get_lightrag_service().finalize()
 
 
 @app.exception_handler(RequestValidationError)

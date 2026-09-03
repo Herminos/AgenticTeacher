@@ -30,4 +30,5 @@ export interface ModelConfig {
   api_key?: string;
   model?: string;
   temperature?: number;
+  api_key_configured?: boolean;
 }

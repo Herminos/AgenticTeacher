@@ -29,21 +29,26 @@ services:
       HF_LOCAL_FILES_ONLY: ${HF_LOCAL_FILES_ONLY:-false}
       MODEL_DEVICE: ${MODEL_DEVICE:-auto}
       MODEL_DTYPE: ${MODEL_DTYPE:-auto}
-      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
       MAX_AGENT_ITERATIONS: ${MAX_AGENT_ITERATIONS:-3}
-      MAX_TOP_K: ${MAX_TOP_K:-15}
-      RETRIEVAL_CANDIDATE_K: ${RETRIEVAL_CANDIDATE_K:-15}
-      RERANKER_TOP_K: ${RERANKER_TOP_K:-5}
+      MAX_TOP_K: ${MAX_TOP_K:-32}
+      RETRIEVAL_CANDIDATE_K: ${RETRIEVAL_CANDIDATE_K:-16}
+      RERANKER_TOP_K: ${RERANKER_TOP_K:-4}
       MAX_INDEX_FILES: ${MAX_INDEX_FILES:-100}
       MAX_INDEX_FILE_MB: ${MAX_INDEX_FILE_MB:-10240}
       MAX_INDEX_TOTAL_MB: ${MAX_INDEX_TOTAL_MB:-10240}
       INDEX_TIMEOUT_MS: ${INDEX_TIMEOUT_MS:-600000}
+      RAG_CHUNK_CHARS: ${RAG_CHUNK_CHARS:-512}
+      RAG_REGISTRY_FILE: ${RAG_REGISTRY_FILE:-/tmp/agentic_teacher_files/rag_registry.json}
+      LIGHTRAG_WORKING_DIR: ${LIGHTRAG_WORKING_DIR:-/tmp/agentic_teacher_files/lightrag}
+      MODEL_SETTINGS_FILE: ${MODEL_SETTINGS_FILE:-/tmp/agentic_teacher_files/model_settings.json}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:
       qdrant:
         condition: service_healthy
     volumes:
       - hf_model_cache:/app/models
+      - rag_files:/tmp/agentic_teacher_files
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready')"]
       interval: 10s
@@ -53,3 +58,4 @@ services:
 volumes:
   qdrant_storage:
   hf_model_cache:
+  rag_files:

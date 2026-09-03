@@ -16,9 +16,15 @@ async def index_documents(
     files: list[UploadFile] = File(...),
     subject: str | None = Form("calculus"),
     hyde_count: int = Form(0),
+    chunk_chars: int | None = Form(None),
+    retrieval_top_k: int | None = Form(None),
+    reranker_top_k: int | None = Form(None),
 ) -> IndexResponse:
     try:
-        return await service.index(files, subject, hyde_count, request.state.request_id)
+        if chunk_chars is None and retrieval_top_k is None and reranker_top_k is None:
+            # Preserve the compact call signature for existing integrations.
+            return await service.index(files, subject, hyde_count, request.state.request_id)
+        return await service.index(files, subject, hyde_count, request.state.request_id, chunk_chars, retrieval_top_k, reranker_top_k)
     except TimeoutError as exc:
         log_event("rag_index", level=logging.ERROR, request_id=request.state.request_id, stage="index", status="failed")
         raise HTTPException(status_code=408, detail={"code": "INDEX_TIMEOUT", "message": str(exc), "retryable": True}) from exc
