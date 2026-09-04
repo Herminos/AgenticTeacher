@@ -56,6 +56,15 @@ services:
       retries: 60
       start_period: 20s
 
+networks:
+  default:
+    driver: bridge
+    driver_opts:
+      # PPPoE commonly exposes MTU 1492 on the host. Keeping Docker at 1500
+      # can black-hole larger TLS handshake packets while small health checks
+      # still work, making cloud providers appear unreachable.
+      com.docker.network.driver.mtu: "${DOCKER_NETWORK_MTU:-1492}"
+
 volumes:
   qdrant_storage:
   hf_model_cache:

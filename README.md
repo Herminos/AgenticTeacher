@@ -60,6 +60,10 @@ npm install --prefix frontend
 npm run dev
 ```
 
+`.env.example` 已通过 `COMPOSE_FILE=docker-compose.yml:docker-compose.gpu.yml`
+默认启用本项目的 RTX GPU override，因此复制后执行普通的 `docker compose up` 也会
+向 API 容器传入 NVIDIA 设备。CPU 主机需要删除该行，并把模型设备配置改回 `auto`。
+
 LightRAG 的索引状态、文档和向量持久化目录由 `LIGHTRAG_WORKING_DIR` 控制（默认
 `/tmp/agentic_teacher_files/lightrag`），Docker 中随 `rag_files` volume 挂载。不要在服务运行后删除该目录，
 否则重启时无法恢复已建立的文档状态。
@@ -70,6 +74,21 @@ LightRAG 的索引状态、文档和向量持久化目录由 `LIGHTRAG_WORKING_D
 `NEXT_PUBLIC_AI_API_URL` 指向 API 主机（例如 `http://192.168.1.10:8000/v1`），并在
 后端 `ALLOWED_ORIGINS` 中加入对应的前端来源；否则浏览器会将 API 请求报告为
 `Failed to fetch`。
+
+如果健康检查正常、浏览器请求也已到达 `/v1/rewrite`，但 API 容器连接 DeepSeek、
+Qwen 或 OpenAI 时卡在 TLS handshake，请比较宿主机出口与容器网卡的 MTU。PPPoE
+通常是 1492，而 Docker bridge 默认是 1500，这会造成“小型健康请求正常、较大的
+TLS 握手包超时”。项目通过 `DOCKER_NETWORK_MTU` 默认把 bridge MTU 设为 1492；
+修改该值后必须重建 Compose 网络，但不要删除数据卷：
+
+```bash
+ip -o link show
+docker compose down
+docker compose up -d qdrant api
+docker compose exec -T api python -c 'import httpx; print(httpx.get("https://api.deepseek.com/models", timeout=15).status_code)'
+```
+
+最后一条不携带 API Key，返回 401 即表示容器 DNS、TCP 和 TLS 链路已经贯通。
 
 如果检索轨迹已经完成、但生成阶段提示连接中断，请先确认 API 容器使用了最新代码：
 `docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build api`。

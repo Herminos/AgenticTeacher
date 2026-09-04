@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from app.core.telemetry import log_event
-from app.services.model_provider import get_provider
+from app.services.model_provider import classify_provider_error, get_provider
 from app.services.usage_service import get_usage_service
 from app.api.retrieve import service as retrieval_service
 from app.schemas import GenerateRequest
@@ -18,21 +18,7 @@ usage_service = get_usage_service()
 
 
 def _generation_error(exc: Exception) -> tuple[str, str, bool, int | None]:
-    error_type = type(exc).__name__
-    status = getattr(getattr(exc, "response", None), "status_code", None)
-    if status in {401, 403}:
-        return "PROVIDER_AUTH_FAILED", "模型供应商鉴权失败，请检查 API Key", False, status
-    if status == 404:
-        return "PROVIDER_NOT_FOUND", "模型或 Base URL 不存在，请检查模型设置", False, status
-    if status == 429:
-        return "PROVIDER_RATE_LIMITED", "模型供应商限流或额度不足，请稍后重试", True, status
-    if isinstance(status, int):
-        return "PROVIDER_HTTP_ERROR", f"模型供应商请求失败（HTTP {status}）", status >= 500, status
-    if "Timeout" in error_type:
-        return "PROVIDER_TIMEOUT", "模型供应商响应超时，请重试", True, None
-    if "RequestError" in error_type or "Connect" in error_type:
-        return "PROVIDER_UNREACHABLE", "无法连接模型供应商，请检查 Base URL 和网络", True, None
-    return "GENERATION_FAILED", "模型生成失败，请检查供应商与模型设置", True, None
+    return classify_provider_error(exc)
 
 
 def _event(event: str, request_id: str, agent_run_id: str, seq: int, payload: dict) -> str:

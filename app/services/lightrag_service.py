@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import socket
@@ -90,7 +91,7 @@ class LightRAGService:
             is_query = str(kwargs.get("context", "document")).lower() == "query"
             return np.asarray(await embed_texts(texts, is_query=is_query), dtype="float32")
         except Exception as exc:  # pragma: no cover - depends on model files
-            log_event("embedding_failed", level="ERROR", stage="embedding", error=str(exc)[:200])
+            log_event("embedding_failed", level=logging.ERROR, stage="embedding", error=str(exc)[:200])
             raise RuntimeError("Qwen embedding failed; refusing to create non-semantic vectors") from exc
 
     async def _rerank(self, query: str, documents: list[str], top_n: int | None = None, **_: Any) -> list[dict[str, Any]]:
@@ -100,7 +101,7 @@ class LightRAGService:
         try:
             scores = await rerank_texts(query, documents)
         except Exception as exc:  # pragma: no cover - depends on model files
-            log_event("reranker_failed", level="ERROR", stage="rerank", error=str(exc)[:200])
+            log_event("reranker_failed", level=logging.ERROR, stage="rerank", error=str(exc)[:200])
             raise RuntimeError("Qwen reranker failed; refusing to use lexical fallback") from exc
         duration_ms = round((perf_counter() - started) * 1000, 2)
         self._reranker_timings.setdefault(query, []).append(duration_ms)

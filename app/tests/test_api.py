@@ -85,6 +85,24 @@ async def test_rewrite_contract() -> None:
     assert response.json()["should_retrieve"] is True
 
 
+async def test_rewrite_reports_provider_timeout_as_upstream_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.api import rewrite as rewrite_api
+
+    class TimeoutProvider:
+        async def rewrite(self, *args, **kwargs):
+            raise httpx.ConnectTimeout("TLS handshake timed out")
+
+    monkeypatch.setattr(rewrite_api, "get_provider", lambda _config: TimeoutProvider())
+    response = await request(
+        "POST",
+        "/v1/rewrite",
+        json={"query": "麦克斯韦方程组是什么", "subject": "physics", "llm": {"provider": "deepseek"}},
+    )
+    assert response.status_code == 504
+    assert response.json()["error"]["code"] == "PROVIDER_TIMEOUT"
+    assert "模型供应商" in response.json()["error"]["message"]
+
+
 async def test_teaching_rewrite_and_non_teaching_empty_decision() -> None:
     teaching = await request(
         "POST",

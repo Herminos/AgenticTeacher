@@ -1,11 +1,11 @@
 import logging
 from time import perf_counter
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 
 from app.core.telemetry import log_event
 from app.schemas import AssessRequest, AssessResponse, RewriteRequest, RewriteResponse
-from app.services.model_provider import get_provider
+from app.services.model_provider import classify_provider_error, get_provider
 from app.services.usage_service import get_usage_service
 
 router = APIRouter()
@@ -23,7 +23,7 @@ async def rewrite(payload: RewriteRequest, request: Request) -> RewriteResponse:
             payload.previous_query,
             payload.missing_aspects,
         )
-    except Exception:
+    except Exception as exc:
         log_event(
             "model_rewrite",
             level=logging.ERROR,
@@ -34,7 +34,24 @@ async def rewrite(payload: RewriteRequest, request: Request) -> RewriteResponse:
             duration_ms=round((perf_counter() - started) * 1000, 2),
             provider=provider_name,
         )
-        raise
+        code, message, retryable, upstream_status = classify_provider_error(exc)
+        if code == "PROVIDER_TIMEOUT":
+            status_code = 504
+        elif code == "PROVIDER_RATE_LIMITED":
+            status_code = 429
+        elif code == "PROVIDER_UNREACHABLE":
+            status_code = 503
+        else:
+            status_code = 502
+        raise HTTPException(
+            status_code=status_code,
+            detail={
+                "code": code,
+                "message": message,
+                "retryable": retryable,
+                "upstream_status": upstream_status,
+            },
+        ) from exc
     duration_ms = round((perf_counter() - started) * 1000, 2)
     response = RewriteResponse.model_validate({**result, "duration_ms": duration_ms})
     usage_service.record(payload.agent_run_id or request.state.request_id, rewrite_ms=duration_ms)
@@ -64,7 +81,7 @@ async def assess(payload: AssessRequest, request: Request) -> AssessResponse:
             [item.model_dump() for item in payload.documents],
             payload.attempt,
         )
-    except Exception:
+    except Exception as exc:
         log_event(
             "evidence_assessment",
             level=logging.ERROR,
@@ -76,7 +93,24 @@ async def assess(payload: AssessRequest, request: Request) -> AssessResponse:
             provider=provider_name,
             attempt=payload.attempt,
         )
-        raise
+        code, message, retryable, upstream_status = classify_provider_error(exc)
+        if code == "PROVIDER_TIMEOUT":
+            status_code = 504
+        elif code == "PROVIDER_RATE_LIMITED":
+            status_code = 429
+        elif code == "PROVIDER_UNREACHABLE":
+            status_code = 503
+        else:
+            status_code = 502
+        raise HTTPException(
+            status_code=status_code,
+            detail={
+                "code": code,
+                "message": message,
+                "retryable": retryable,
+                "upstream_status": upstream_status,
+            },
+        ) from exc
     duration_ms = round((perf_counter() - started) * 1000, 2)
     response = AssessResponse.model_validate({**result, "duration_ms": duration_ms})
     usage_service.record(payload.agent_run_id or request.state.request_id, assessment_ms=duration_ms)

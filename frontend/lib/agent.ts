@@ -98,7 +98,11 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
       // subsequent cloud generation request fails.
       input.onDocuments?.(documents);
       const retrievalDuration = retrieved.quality_hint.retrieval_ms + retrieved.quality_hint.reranker_ms;
-      add("retrieve", "succeeded", `召回 ${retrieved.quality_hint.candidate_count} 个子块候选，重排前 4 个子块映射为 ${documents.length} 个父块`, undefined, retrievalDuration);
+      const matchedChildren = documents.reduce((total, document) => {
+        const count = Number(document.metadata.matched_child_count ?? 1);
+        return total + (Number.isFinite(count) && count > 0 ? count : 1);
+      }, 0);
+      add("retrieve", "succeeded", `召回 ${retrieved.quality_hint.candidate_count} 个子块候选，重排命中 ${matchedChildren} 个子块并映射为 ${documents.length} 个父块`, undefined, retrievalDuration);
       add("grade", "running", "云端模型正在判断教材证据是否足够...");
       // The evidence-review contract accepts at most five documents. Retrieval
       // may be configured with a larger parent TopK for UI exploration, but

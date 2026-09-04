@@ -5,6 +5,7 @@ optional ML dependencies or model weights are not installed.
 """
 
 import asyncio
+import logging
 from functools import lru_cache
 from threading import Lock
 from time import perf_counter
@@ -277,7 +278,7 @@ async def warmup_hf_models() -> None:
             _runtime.update(status="failed", error=str(exc)[:300])
         log_event(
             "hf_models_failed",
-            level="ERROR",
+            level=logging.ERROR,
             stage="model_warmup",
             status="failed",
             duration_ms=round((perf_counter() - started) * 1000, 2),
